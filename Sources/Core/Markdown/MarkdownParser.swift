@@ -74,6 +74,8 @@ public enum MarkdownParser {
                     var z = a
                     while z < ie && p[z] != 0x20 && p[z] != 0x7B && p[z] != 0x2C { z += 1 }
                     b.language = Language.named(p + a, z - a) ?? .plain
+                    b.output = z - a == 6 && p[a] == 0x6F && p[a + 1] == 0x75 && p[a + 2] == 0x74
+                        && p[a + 3] == 0x70 && p[a + 4] == 0x75 && p[a + 5] == 0x74   // "output"
                 }
             case .rule:
                 break

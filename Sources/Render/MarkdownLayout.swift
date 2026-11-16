@@ -204,7 +204,11 @@ enum MarkdownLayout {
             let box = TextBox(attributed: a, origin: CGPoint(x: bx + m.codePad, y: m.codePad), width: bw - 2 * m.codePad,
                               start: Int(b.textStart), end: Int(b.textEnd), text: env.doc.text, lineGap: m.lineGap(m.codeSize, 1.45))
             let bg = CGRect(x: bx, y: 0, width: bw, height: box.rect.height + 2 * m.codePad)
-            out.decos.append(PlacedDeco(minY: 0, maxY: bg.maxY, deco: .fill(bg, .blockBackground, 6)))
+            if b.output {   // notebook output: a rule at the left, no fill (code cells keep theirs)
+                out.decos.append(PlacedDeco(minY: 0, maxY: bg.maxY, deco: .fill(CGRect(x: bx, y: 0, width: 2, height: bg.height), .border, 1)))
+            } else {
+                out.decos.append(PlacedDeco(minY: 0, maxY: bg.maxY, deco: .fill(bg, .blockBackground, 6)))
+            }
             out.boxes.append(box)
             y = bg.maxY
         case .rule:

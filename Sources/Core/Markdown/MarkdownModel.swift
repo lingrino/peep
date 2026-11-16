@@ -83,6 +83,7 @@ public struct MDBlock: Sendable {
     public var runStart: Int32 = 0
     public var runEnd: Int32 = 0
     public var language: Language = .plain // code blocks
+    public var output = false              // code block fenced as ```output (notebook outputs)
     public var table: Int32 = -1
     /// Index in `headings` for heading blocks.
     public var heading: Int32 = -1

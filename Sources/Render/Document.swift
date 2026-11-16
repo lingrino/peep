@@ -78,6 +78,12 @@ public final class Document {
             }
         }
         mark("detect")
+        // Jupyter notebooks render as Markdown (anything that isn't one stays JSON).
+        if lang == .json && (name as NSString).pathExtension.lowercased() == "ipynb", let md = Notebook.markdown(text) {
+            text = md
+            lang = .markdown
+            mark("notebook")
+        }
         // Minified JSON is re-indented for display (formats that allow comments or are
         // line-structured are left alone).
         var formatted = false
