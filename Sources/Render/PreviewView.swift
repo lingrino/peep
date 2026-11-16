@@ -86,21 +86,21 @@ public final class PreviewView: NSView {
         o.setCurrent(heading: max(0, c.outlineIndex(atY: y + 40)))
     }
 
-    /// Scrolls outline entry `i` to the top (as far as the document allows) and marks it
-    /// current; flashes it when it couldn't reach the top.
+    /// Scrolls outline entry `i` to the top (as far as the document allows), marks it current
+    /// and flashes it, so every jump shows where it landed.
     public func jumpToOutline(_ i: Int) {
         guard let span = document?.content.outlineSpan(i) else { return }
         reveal(span, outlineIndex: i)
     }
 
-    private func reveal(_ span: (top: CGFloat, height: CGFloat), outlineIndex i: Int?, alwaysFlash: Bool = false) {
+    private func reveal(_ span: (top: CGFloat, height: CGFloat), outlineIndex i: Int?) {
         documentView.scrollToTop(y: span.top - 12)
         let y = scrollView.contentView.bounds.minY
         if let i {
             pinned = (i, y)
             if let o = outline, !o.isHidden { o.setCurrent(heading: i) }
         }
-        if alwaysFlash || span.top - 12 > y + 1 { documentView.flash(top: span.top, height: span.height) }
+        documentView.flash(top: span.top, height: span.height)
     }
 
     /// Sidebar for Markdown headings and code declarations (3 or more entries).
@@ -136,12 +136,8 @@ public final class PreviewView: NSView {
         if l.hasPrefix("#") {
             guard let c = document?.content, let span = c.anchorSpan(l) else { return }
             let i = c.outlineIndex(atY: span.top)
-            if i >= 0, c.outlineSpan(i)?.top == span.top {
-                reveal(span, outlineIndex: i)
-            } else {
-                // Footnotes and their references are small targets: always show where they are.
-                reveal(span, outlineIndex: nil, alwaysFlash: true)
-            }
+            // Headings also become the current outline entry; footnotes and references don't.
+            reveal(span, outlineIndex: i >= 0 && c.outlineSpan(i)?.top == span.top ? i : nil)
             return
         }
         if let u = URL(string: l), u.scheme != nil { onExternalLink?(l); return }
