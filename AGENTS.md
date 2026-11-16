@@ -109,18 +109,23 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 - In the flipped context, Core Text baseline offsets are inverted (superscript = negative).
 - `CTLineDraw` advances `ctx.textPosition`; reset it after, or the next glyph-table line draws
   offset.
-- Markdown layout is progressive: blocks are laid out synchronously until ~2400 pt exist, the
-  rest get estimated heights and are laid out in parallel in the background, then the whole
-  list is re-stacked. Consequences:
+- Markdown layout is progressive: blocks are laid out synchronously until the viewport (+160
+  pt) is covered, the rest get estimated heights and are laid out in parallel in the
+  background, then the whole list is re-stacked. Consequences:
   - Anything that re-stacks must place boxes *absolutely* (`TextBox.place(top:)`); relative
     translation drew the prefix at 2× its y once background layout landed (this shipped).
   - Exact geometry below the prefix needs `finishLayout()` (anchors, find reveal, outline
-    clicks); `willShow` calls it when an estimated region is about to be drawn.
+    clicks); `willShow` calls it when the *visible* rect reaches an estimated region. Never
+    pass the tile margin to `willShow`: that silently made first paint lay out everything.
   - The background job starts *after* the first frame: its threads hold Core Text's per-font
     shaping lock, and a first draw competing with them was 5× slower.
 - First-paint budget is measured with `peep-dev firstpaint`, not guessed. `NSVisualEffectView`
   cost ~14 ms there (CPU compositing in `renderInContext`); use plain colors unless something
   is actually behind the view.
+- Text in small views (outline rows, labels) is Core Text lines + `CTLineDraw`, never
+  `NSAttributedString.draw` (TextKit: 6 ms for one screen of outline rows).
+- Code lines are classified/shaped/drawn only up to the prefix that can reach the tile's right
+  edge; a long line with one non-ASCII character must not be shaped whole per tile.
 - Core Text applies a paragraph style's extra line height above the first line too; `TextBox`
   shifts it away so a box starts at its first line's top.
 - Markdown parse hot spots were never the obvious ones: per-paragraph scratch copies (reference
