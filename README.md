@@ -1,0 +1,29 @@
+# Peep
+
+A fast Quick Look extension for macOS: select a source file or Markdown document in Finder,
+press Space, and get a syntax-highlighted (or rendered) preview. Press ⌘F to search inside it.
+
+- **Code**: ~60 languages and formats, hand-written lexers, line numbers, no wrapping,
+  selection and copy, light/dark themes modeled on Xcode's.
+- **Markdown**: CommonMark + GitHub extensions (tables, task lists, strikethrough, autolinks,
+  footnotes), highlighted code blocks, images (local and remote), a common subset of inline
+  HTML, and a table-of-contents sidebar.
+- **Find**: ⌘F, ⌘G/⇧⌘G, Return/⇧Return, Esc — incremental, smart-case, SIMD search.
+- **Binary files**: property lists shown as XML, everything else as a hex dump.
+
+Everything is native (Core Text, no web views) and dependency-free. Built for macOS 27 on
+Apple Silicon.
+
+## Building
+
+Requires the Xcode Command Line Tools.
+
+```sh
+Scripts/setup-signing.sh      # once: a local code-signing identity
+Scripts/build.sh install      # build, sign, install to /Applications
+```
+
+Then open Peep.app once and grant Accessibility access when asked (Quick Look previews can't
+receive keystrokes; Peep's small background agent forwards ⌘F and friends).
+
+Architecture and development notes for contributors (human or AI) are in [AGENTS.md](AGENTS.md).
