@@ -145,6 +145,20 @@ public struct MDCell: Sendable {
 public struct MDHeading: Sendable {
     public var level: Int
     public var title: String
-    public var slug: String
     public var block: Int
+}
+
+extension MarkdownDocument {
+    /// GitHub-style anchor slugs of `headings` (repeats get -1, -2, ...). Computed on demand:
+    /// only in-document links use them, and Unicode slugs (emoji headings in changelogs) cost
+    /// more than parsing the rest of the document.
+    public func headingSlugs() -> [String] {
+        var seen: [String: Int] = [:]
+        return headings.map { h in
+            let b = blocks[h.block]
+            var slug = MarkdownParser.slugify(text.string(Int(b.textStart), Int(b.textEnd)))
+            if let n = seen[slug] { seen[slug] = n + 1; slug += "-\(n + 1)" } else { seen[slug] = 0 }
+            return slug
+        }
+    }
 }

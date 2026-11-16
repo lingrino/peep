@@ -235,6 +235,11 @@ func smoke(_ args: [String]) {
 @MainActor
 func parsebench(_ args: [String]) {
     let n = args.count > 1 ? Int(args[1]) ?? 200 : 200
+    var isDir: ObjCBool = false
+    if FileManager.default.fileExists(atPath: args[0], isDirectory: &isDir), isDir.boolValue {
+        parsebenchCorpus(args[0], n)
+        return
+    }
     let f = try! FileLoader.load(path: args[0], limit: 1 << 30)
     guard case .text(let text, _, _) = Decoder.decode(f.raw) else { return }
     var best = UInt64.max
@@ -244,6 +249,37 @@ func parsebench(_ args: [String]) {
         best = min(best, nanotime() - t0)
     }
     print(String(format: "parse %.3fms (%.0f MB/s)", Double(best) / 1e6, Double(text.count) / Double(best) * 1e3))
+}
+
+/// Corpus mode: best-of-N parse time per .md file, aggregated by size (total bytes / total
+/// time, so big files don't hide small-file overhead), plus the slowest files.
+@MainActor
+func parsebenchCorpus(_ dir: String, _ n: Int) {
+    let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".md") }.sorted()
+    var buckets: [(String, Int, Int, UInt64, Int)] = [("< 2 KB", 0, 2 << 10, 0, 0), ("2-8 KB", 2 << 10, 8 << 10, 0, 0),
+                                                       ("8-64 KB", 8 << 10, 64 << 10, 0, 0), (">= 64 KB", 64 << 10, .max, 0, 0)]
+    var rates: [(Double, String, Int)] = []
+    for name in files {
+        guard let f = try? FileLoader.load(path: dir + "/" + name, limit: 1 << 30),
+              case .text(let text, _, _) = Decoder.decode(f.raw), text.count > 0 else { continue }
+        var best = UInt64.max
+        for _ in 0..<n {
+            let t0 = nanotime()
+            _ = MarkdownParser.parse(text)
+            best = min(best, nanotime() - t0)
+        }
+        for k in buckets.indices where text.count >= buckets[k].1 && text.count < buckets[k].2 {
+            buckets[k].3 += best
+            buckets[k].4 += text.count
+        }
+        rates.append((Double(text.count) / Double(best) * 1e3, name, text.count))
+    }
+    for b in buckets where b.3 > 0 {
+        print(String(format: "%-9@ %8d bytes  %7.0f MB/s", b.0 as NSString, b.4, Double(b.4) / Double(b.3) * 1e3))
+    }
+    rates.sort { $0.0 < $1.0 }
+    print("slowest:")
+    for r in rates.prefix(8) { print(String(format: "  %6.0f MB/s  %7d B  %@", r.0, r.2, r.1 as NSString)) }
 }
 
 /// Differential check for the markdown parser: writes a complete dump of each parsed
@@ -328,7 +364,8 @@ func dumpMarkdown(_ d: MarkdownDocument) -> String {
             o += "  C\(c) text \(cell.textStart)..<\(cell.textEnd) runs \(cell.runStart)..<\(cell.runEnd) |\(esc(Int(cell.textStart), Int(cell.textEnd)))|\n"
         }
     }
-    for (i, h) in d.headings.enumerated() { o += "H\(i) level=\(h.level) block=\(h.block) slug=\(h.slug) title=\(h.title)\n" }
+    let slugs = d.headingSlugs()
+    for (i, h) in d.headings.enumerated() { o += "H\(i) level=\(h.level) block=\(h.block) slug=\(slugs[i]) title=\(h.title)\n" }
     return o
 }
 

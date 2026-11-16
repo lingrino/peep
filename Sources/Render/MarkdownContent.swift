@@ -435,7 +435,7 @@ public final class MarkdownContent: DocumentContent {
         finishLayout()
         let n = name.hasPrefix("#") ? String(name.dropFirst()) : name
         let key = n.removingPercentEncoding ?? n
-        guard let i = doc.headings.firstIndex(where: { $0.slug == key || $0.slug == key.lowercased() }) else { return nil }
+        guard let i = doc.headingSlugs().firstIndex(where: { $0 == key || $0 == key.lowercased() }) else { return nil }
         return headingY[i]
     }
 }

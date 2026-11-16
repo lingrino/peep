@@ -39,27 +39,27 @@ final class InlineParser {
     }
 
     // Per block (reset by `parse`).
-    var nodes = RawArray<Node>(capacity: 256)
+    var nodes: RawArray<Node>
     var head: Int32 = -1
     var tail: Int32 = -1
-    var delims = RawArray<Int32>(capacity: 64)
-    var brackets = RawArray<Bracket>(capacity: 16)
-    var scratch = ByteBuf(capacity: 256)
+    var delims: RawArray<Int32>
+    var brackets: RawArray<Bracket>
+    var scratch: ByteBuf
     /// The current block's input; text nodes without `fScratch` index it.
     var src: UnsafePointer<UInt8>
 
     // Reused helpers.
-    var gather = ByteBuf(capacity: 1024)   // joined lines (see `joinLines`)
-    var label = ByteBuf(capacity: 64)      // normalized reference labels, attribute values
-    var tmp = ByteBuf(capacity: 64)        // link text for labels
-    var cells = RawArray<Int32>(capacity: 32)   // `splitCells` output, pairs
+    var gather: ByteBuf     // joined lines (see `joinLines`)
+    var label: ByteBuf      // normalized reference labels, attribute values
+    var tmp: ByteBuf        // link text for labels
+    var cells: RawArray<Int32>   // `splitCells` output, pairs
 
     // The document being built.
     var out: ByteBuf
     var runs: RawArray<MDRun>
     var strings: ByteBuf
-    var links = RawArray<StrRange>(capacity: 32)
-    var images = RawArray<MDImageSpec>(capacity: 8)
+    var links: RawArray<StrRange>
+    var images: RawArray<MDImageSpec>
     var footnotes: [String: Int] = [:]
     /// Block-level hints discovered while parsing HTML (align, heading level).
     var blockAlign: MDAlign = .left
@@ -81,11 +81,25 @@ final class InlineParser {
 
     private var finished = false
     let special: UnsafePointer<UInt8> = InlineParser.specialTable
+    let specialSet = InlineParser.specialNibbles
+    static let specialNibbles = NibbleSet { InlineParser.specialTable[Int($0)] != 0 }
 
-    init(sourceCount n: Int) {
+    /// Working buffers start in `arena`; the output text and string store are their own
+    /// allocations (they become the document's).
+    init(sourceCount n: Int, _ arena: inout Arena) {
+        nodes = RawArray(capacity: 128, &arena)
+        delims = RawArray(capacity: 32, &arena)
+        brackets = RawArray(capacity: 16, &arena)
+        scratch = ByteBuf(capacity: 256, &arena)
+        gather = ByteBuf(capacity: 512, &arena)
+        label = ByteBuf(capacity: 64, &arena)
+        tmp = ByteBuf(capacity: 64, &arena)
+        cells = RawArray(capacity: 32, &arena)
+        links = RawArray(capacity: 32, &arena)
+        images = RawArray(capacity: 8, &arena)
+        runs = RawArray(capacity: min(n / 32 + 16, 1024), &arena)
         src = UnsafePointer(scratch.p)
         out = ByteBuf(capacity: n + n / 16 + 64)
-        runs = RawArray(capacity: n / 32 + 16)
         strings = ByteBuf(capacity: 256)
     }
 
@@ -222,15 +236,22 @@ final class InlineParser {
 
     func tokenize(_ p: UnsafePointer<UInt8>, _ n: Int) {
         let cls = special
+        let set = specialSet
         var i = 0
         var textStart = 0
         @inline(__always) func flush(_ upto: Int) {
             if upto > textStart { text(textStart, upto) }
         }
         while i < n {
+            // Skip plain text 16 bytes at a time (reads past `n` are padding or later input,
+            // and a hit past `n` ends the loop).
+            let m = nibblesOf(set.match(load16(p + i)))
+            if m == 0 { i &+= 16; continue }
+            i &+= Int(truncatingIfNeeded: m.trailingZeroBitCount >> 2)
+            if i >= n { break }
             let b = p[i]
             let k = cls[Int(b)]
-            if k == 0 { i &+= 1; continue }
+            if k == 0 { i &+= 1; continue }   // (the vector set is exact; never taken)
             if k == 2 {
                 // GFM bare autolinks at word starts (www., http://, https://), found from the
                 // ':' or '.' that follows the prefix.

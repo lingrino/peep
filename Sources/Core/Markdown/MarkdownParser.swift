@@ -3,15 +3,26 @@ import Darwin
 /// Markdown source -> MarkdownDocument (rendered text + runs + blocks).
 public enum MarkdownParser {
     public static func parse(_ src: TextBuffer) -> MarkdownDocument {
-        let p = UnsafePointer(src.base)
-        let inl = InlineParser(sourceCount: src.count)
-        let bp = BlockParser(p, src.count, inl)
+        // Working buffers for both passes in one stack allocation (falls back to the heap if
+        // the stack is short); buffers that outgrow it move to the heap.
+        withUnsafeTemporaryAllocation(byteCount: 12 << 10 + min(2 * src.count, 48 << 10), alignment: 16) { buf in
+            var arena = Arena(buf)
+            let inl = InlineParser(sourceCount: src.count, &arena)
+            let bp = BlockParser(UnsafePointer(src.base), src.count, inl, &arena)
+            return parse(bp, inl)
+        }
+    }
+
+    static func parse(_ bp: BlockParser, _ inl: InlineParser) -> MarkdownDocument {
+        let p = bp.p
         bp.run()
         var blocks: [MDBlock] = []
         blocks.reserveCapacity(bp.blocks.count)
         var tables: [MDTable] = []
         var headings: [MDHeading] = []
-        var slugs: [String: Int] = [:]
+        var headingCount = 0
+        for k in 0..<bp.blocks.count where bp.blocks[k].kind == .heading { headingCount += 1 }
+        headings.reserveCapacity(headingCount)
 
         for bi in 0..<bp.blocks.count {
             let pb = bp.blocks[bi]
@@ -76,11 +87,9 @@ public enum MarkdownParser {
             b.runEnd = Int32(inl.runs.count)
             if b.kind == .heading {
                 let title = inl.out.string(Int(b.textStart), Int(b.textEnd))
-                var slug = slugify(title)
-                if let n = slugs[slug] { slugs[slug] = n + 1; slug += "-\(n + 1)" } else { slugs[slug] = 0 }
                 b.heading = Int32(headings.count)
                 headings.append(MDHeading(level: Int(b.level), title: headingTitle(title, b, inl),
-                                          slug: slug, block: blocks.count))
+                                          block: blocks.count))
             }
             inl.out.append(0x0A)   // block separator
             blocks.append(b)

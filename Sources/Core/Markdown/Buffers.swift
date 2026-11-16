@@ -6,18 +6,52 @@ import Darwin
 // append, and `append(contentsOf:)` of a slice goes through generic code: together ~20% of
 // parse time before these. Here an append is a capacity compare and a store. The parser
 // objects own the buffers and free them when done.
+//
+// Working buffers start in an `Arena` (one stack allocation per parse: ~25 mallocs + frees
+// were 12% of a small README's parse) and move to the heap only if they outgrow it.
+
+/// Bump allocator over one caller-provided block (see `MarkdownParser.parse`).
+struct Arena {
+    var p: UnsafeMutableRawPointer
+    var end: UnsafeMutableRawPointer
+
+    init(_ buf: UnsafeMutableRawBufferPointer) {
+        p = buf.baseAddress!
+        end = p + buf.count
+    }
+
+    /// `bytes` bytes aligned to 16, or nil if the arena is exhausted.
+    mutating func take(_ bytes: Int) -> UnsafeMutableRawPointer? {
+        let a = UnsafeMutableRawPointer(bitPattern: (Int(bitPattern: p) + 15) & ~15)!
+        if a + bytes > end { return nil }
+        p = a + bytes
+        return a
+    }
+}
 
 struct RawArray<T: BitwiseCopyable> {
     var p: UnsafeMutablePointer<T>
     var count = 0
     var cap: Int
+    /// False while `p` points into an arena.
+    var owned = true
 
     init(capacity: Int) {
         cap = max(8, capacity)
         p = .allocate(capacity: cap)
     }
 
-    func free() { p.deallocate() }
+    init(capacity: Int, _ arena: inout Arena) {
+        cap = max(8, capacity)
+        if let m = arena.take(cap * MemoryLayout<T>.stride) {
+            p = m.bindMemory(to: T.self, capacity: cap)
+            owned = false
+        } else {
+            p = .allocate(capacity: cap)
+        }
+    }
+
+    func free() { if owned { p.deallocate() } }
 
     @inline(__always) var isEmpty: Bool { count == 0 }
 
@@ -42,9 +76,10 @@ struct RawArray<T: BitwiseCopyable> {
         while c < need { c &*= 2 }
         let q = UnsafeMutablePointer<T>.allocate(capacity: c)
         q.initialize(from: p, count: count)
-        p.deallocate()
+        if owned { p.deallocate() }
         p = q
         cap = c
+        owned = true
     }
 
     @inline(__always) mutating func removeLast(_ k: Int = 1) { count &-= k }
@@ -72,6 +107,8 @@ struct ByteBuf {
     var p: UnsafeMutablePointer<UInt8>
     var count = 0
     var cap: Int
+    /// False while `p` points into an arena (never for buffers that `finish()`).
+    var owned = true
 
     init(capacity: Int) {
         cap = max(64, capacity)
@@ -79,7 +116,18 @@ struct ByteBuf {
             .assumingMemoryBound(to: UInt8.self)
     }
 
-    func free() { p.deallocate() }
+    init(capacity: Int, _ arena: inout Arena) {
+        cap = max(64, capacity)
+        if let m = arena.take(cap + TextBuffer.padding) {
+            p = m.bindMemory(to: UInt8.self, capacity: cap + TextBuffer.padding)
+            owned = false
+        } else {
+            p = UnsafeMutableRawPointer.allocate(byteCount: cap + TextBuffer.padding, alignment: 128)
+                .assumingMemoryBound(to: UInt8.self)
+        }
+    }
+
+    func free() { if owned { p.deallocate() } }
 
     @inline(__always) var last: UInt8 { p[count &- 1] }
 
@@ -131,9 +179,10 @@ struct ByteBuf {
         let q = UnsafeMutableRawPointer.allocate(byteCount: c + TextBuffer.padding, alignment: 128)
             .assumingMemoryBound(to: UInt8.self)
         memcpy(q, p, count)
-        p.deallocate()
+        if owned { p.deallocate() }
         p = q
         cap = c
+        owned = true
     }
 
     /// Hands the bytes to a TextBuffer (zeroed padding). The ByteBuf must not be used after.

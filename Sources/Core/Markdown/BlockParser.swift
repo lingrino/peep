@@ -52,7 +52,7 @@ final class BlockParser {
 
     enum Leaf: UInt8 { case none, paragraph, fenced, indented, html, table }
 
-    var stack = RawArray<Container>(capacity: 16)
+    var stack: RawArray<Container>
     var leaf = Leaf.none
     /// Index in `lines` (Int32 units) where the open leaf's lines start.
     var leafFirst = 0
@@ -65,18 +65,21 @@ final class BlockParser {
 
     var blocks: RawArray<PendingBlock>
     var lines: RawArray<Int32>       // leaf content lines, pairs (start, end)
-    var lists = RawArray<ListInfo>(capacity: 16)
-    var aligns = RawArray<MDAlign>(capacity: 16)
+    var lists: RawArray<ListInfo>
+    var aligns: RawArray<MDAlign>
     var lastLineBlank = false
     var pendingBlankItems = false
 
-    init(_ p: UnsafePointer<UInt8>, _ n: Int, _ inline: InlineParser) {
+    init(_ p: UnsafePointer<UInt8>, _ n: Int, _ inline: InlineParser, _ arena: inout Arena) {
         self.p = p
         self.n = n
         self.inline = inline
         // ~1 block per 70 bytes and a line per 40 in typical documents; growth is cheap anyway.
-        blocks = RawArray(capacity: n / 64 + 16)
-        lines = RawArray(capacity: n / 16 + 32)
+        stack = RawArray(capacity: 16, &arena)
+        lists = RawArray(capacity: 16, &arena)
+        aligns = RawArray(capacity: 16, &arena)
+        blocks = RawArray(capacity: min(n / 64 + 16, 512), &arena)
+        lines = RawArray(capacity: min(n / 16 + 32, 2048), &arena)
     }
 
     deinit {
@@ -154,6 +157,38 @@ final class BlockParser {
     // MARK: - Per line
 
     func processLine(_ ls: Int, _ le: Int) {
+        if stack.isEmpty {
+            // No containers to continue (most lines): fenced-code content, plain paragraph text
+            // and blank lines take the same steps as below with one whitespace scan and no
+            // recognizers.
+            let (ind, at) = indentation(ls, le, col: 0)
+            let blank = at == le
+            if leaf == .fenced {
+                if ind <= 3 && isClosingFence(at, le) {
+                    closeLeaf()
+                } else {
+                    let (sp, _) = consumeColumns(ls, le, col: 0, count: fenceIndent)
+                    addLine(sp, le)
+                }
+                lastLineBlank = blank
+                return
+            }
+            if leaf != .html {
+                if blank {
+                    leafLine(ls, le, col: 0, blank: true)
+                    lastLineBlank = true
+                    return
+                }
+                if ind < 4 && BlockParser.plainStart[Int(p[at])] != 0 {
+                    if leaf == .table { addLine(at, le); lastLineBlank = false; return }
+                    if leaf != .paragraph { closeLeaf(); startLeaf(.paragraph) }
+                    addLine(at, le)
+                    itemStarted()
+                    lastLineBlank = false
+                    return
+                }
+            }
+        }
         var pos = ls
         var col = 0
         var matched = 0
@@ -264,6 +299,17 @@ final class BlockParser {
         leafLine(pos, le, col: col, blank: blank)
         lastLineBlank = blank
     }
+
+    /// Bytes that can't begin anything but paragraph text (not a container marker, and not
+    /// the first byte of a heading, break, fence, HTML block, setext underline or table
+    /// delimiter row).
+    nonisolated(unsafe) static let plainStart: UnsafePointer<UInt8> = {
+        let t = UnsafeMutablePointer<UInt8>.allocate(capacity: 256)
+        t.initialize(repeating: 1, count: 256)
+        for c in ">-+*#`~<=_|: \t".utf8 { t[Int(c)] = 0 }
+        for c in UInt8(0x30)...UInt8(0x39) { t[Int(c)] = 0 }
+        return UnsafePointer(t)
+    }()
 
     func closeUnmatched(_ matched: Int) {
         if matched < stack.count {

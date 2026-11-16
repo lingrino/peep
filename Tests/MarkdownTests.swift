@@ -166,7 +166,7 @@ let markdownTests: [Test] = [
     },
     Test("md: headings collected with slugs") {
         let d = MarkdownParser.parse(TextBuffer("# Hello World!\n## Hello World!\n### API `v2`"))
-        expectEqual(d.headings.map(\.slug), ["hello-world", "hello-world-1", "api-v2"])
+        expectEqual(d.headingSlugs(), ["hello-world", "hello-world-1", "api-v2"])
         expectEqual(d.headings.map(\.level), [1, 2, 3])
     },
     Test("md: robustness on random input") {
