@@ -42,6 +42,13 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
    otherwise deliver ~0.5 s late (see Quick Look facts).
    It also opens links (sandbox forbids `NSWorkspace.open`) and fetches remote images (Quick
    Look's sandbox denies outbound connections even with `network.client`).
+   And it shows the copy-path button after the panel's title (`TitleButton`): the title bar is
+   Quick Look's, so the button is a tiny non-activating window of the agent's (activation policy
+   `.accessory`), placed from the title text's Accessibility frame (`AXStaticText` in the
+   panel's title bar), hidden while the panel is dragged or resized, re-placed on preview state
+   messages (which carry the file path), mouse-up and a 0.5 s poll. The computer-use screenshot
+   tool doesn't show the agent's windows (a launchd process, not the app): verify with
+   `CGWindowListCopyWindowInfo` and by clicking it (`pbpaste`).
 3. **Peep.app** — `Sources/App/HostApp.swift`. Opening it shows setup status (extension,
    agent, Accessibility) and can open any file in a viewer window with the same renderer.
    `Peep --register` (used by the installer) writes/reloads the LaunchAgent plist.

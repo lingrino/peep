@@ -35,10 +35,11 @@ final class AgentClient {
         states[id] = nil
     }
 
-    func sendState(id: UInt64, size: CGSize, visible: Bool, find: Bool, selection: Bool, matches: Bool) {
+    func sendState(id: UInt64, size: CGSize, visible: Bool, find: Bool, selection: Bool, matches: Bool, path: String) {
         let m = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(m, "t", "state")
         xpc_dictionary_set_uint64(m, "id", id)
+        xpc_dictionary_set_string(m, "path", path)
         xpc_dictionary_set_double(m, "w", size.width)
         xpc_dictionary_set_double(m, "h", size.height)
         xpc_dictionary_set_bool(m, "visible", visible)

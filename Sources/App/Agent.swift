@@ -13,7 +13,7 @@ import os
 /// a Peep preview is showing in the frontmost app's Quick Look panel.
 ///
 /// Wire protocol (XPC dictionaries, key "t" = message type):
-///   extension -> agent  "state": id, w, h, visible, find, sel, matches
+///   extension -> agent  "state": id, w, h, visible, find, sel, matches, path
 ///                       "open":  url        (open a link; sandboxed extensions can't)
 ///                       "fetch": url -> reply {data} (remote images; QL's sandbox blocks network)
 ///   agent -> extension  "key":   id, code, chars, mods
@@ -23,7 +23,8 @@ enum Agent {
 
     @MainActor static func run() -> Never {
         let app = NSApplication.shared
-        app.setActivationPolicy(.prohibited)
+        // Accessory, not prohibited: the copy-path button is a (never key, non-activating) window.
+        app.setActivationPolicy(.accessory)
         AgentCore.shared.start()
         app.run()
         exit(0)
@@ -45,6 +46,7 @@ final class AgentCore {
         var matches: Bool
         var conn: xpc_connection_t
         var seen: UInt64   // nanotime of last update (most recent wins ties)
+        var path: String
     }
 
     private var listener: xpc_connection_t?
@@ -91,6 +93,7 @@ final class AgentCore {
     private func handle(_ msg: xpc_object_t, from peer: xpc_connection_t) {
         if xpc_get_type(msg) == XPC_TYPE_ERROR {
             previews.removeAll { $0.conn === peer }
+            titleButton.update()
             return
         }
         guard xpc_get_type(msg) == XPC_TYPE_DICTIONARY, let t = xpc_dictionary_get_string(msg, "t") else { return }
@@ -103,12 +106,14 @@ final class AgentCore {
                             find: xpc_dictionary_get_bool(msg, "find"),
                             selection: xpc_dictionary_get_bool(msg, "sel"),
                             matches: xpc_dictionary_get_bool(msg, "matches"),
-                            conn: peer, seen: nanotime())
+                            conn: peer, seen: nanotime(),
+                            path: xpc_dictionary_get_string(msg, "path").map { String(cString: $0) } ?? "")
             if let k = previews.firstIndex(where: { $0.id == id && $0.conn === peer }) {
                 if p.visible { previews[k] = p } else { previews.remove(at: k) }
             } else if p.visible {
                 previews.append(p)
             }
+            titleButton.soon()
         case "fetch":
             guard let s = xpc_dictionary_get_string(msg, "url"), let url = URL(string: String(cString: s)),
                   ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
@@ -161,6 +166,7 @@ final class AgentCore {
 
     private func installTap() -> Bool {
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseUp.rawValue)
         guard let t = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                         eventsOfInterest: mask, callback: { _, type, event, _ in
             MainActor.assumeIsolated { AgentCore.shared.tapped(type, event) }
@@ -182,7 +188,9 @@ final class AgentCore {
             return Unmanaged.passUnretained(event)
         }
         if previews.isEmpty { return Unmanaged.passUnretained(event) }
+        if type == .leftMouseUp { titleButton.mouseUp(); return Unmanaged.passUnretained(event) }
         if type == .leftMouseDown {
+            titleButton.mouseDown(at: event.location)
             if event.getIntegerValueField(.mouseEventClickState) == 1 { forwardClick(event) }
             return Unmanaged.passUnretained(event)   // never consumed: Quick Look still delivers it (late)
         }
@@ -214,6 +222,17 @@ final class AgentCore {
         }
         if ctrl { return false }
         return p.find   // while finding, every plain/option/shift key edits the query
+    }
+
+    let titleButton = TitleButton()
+
+    /// The panel and Peep preview the title button belongs to (fresh, not cached).
+    func panelAndPreview() -> (pid: pid_t, panel: CGRect, preview: Preview)? {
+        guard let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              let panel = quickLookPanel(of: front) else { return nil }
+        panelCache = (front, nanotime(), panel)
+        guard let p = target() else { return nil }
+        return (front, panel, p)
     }
 
     /// The visible Peep preview shown in the frontmost app's Quick Look panel, if any.
@@ -278,5 +297,175 @@ final class AgentCore {
         xpc_dictionary_set_uint64(msg, "mods", e.flags.rawValue)
         xpc_dictionary_set_string(msg, "chars", chars)
         xpc_connection_send_message(p.conn, msg)
+    }
+}
+
+/// A copy-path button just after the title of a Quick Look panel showing a Peep preview.
+///
+/// The title bar belongs to Quick Look (another process), so the button is a tiny window of
+/// the agent's, floating just above the panel and placed from the title text's Accessibility
+/// frame. It is non-activating and never key: Finder keeps the keyboard and the panel stays
+/// open. It follows the panel on preview changes (state messages), after drags and resizes
+/// (mouse up), and on a slow poll; it hides while the panel is dragged or resized.
+@MainActor
+final class TitleButton {
+    private var panel: NSPanel?
+    private var view: CopyPathView?
+    private var timer: Timer?
+    private var dragging = false
+    private var lastPanel = CGRect.null
+
+    /// Re-place a few times while the panel settles (it zooms open), then keep polling slowly.
+    func soon() {
+        update()
+        for delay in [0.12, 0.3, 0.55] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { self.update() } }
+        }
+    }
+
+    func mouseDown(at p: CGPoint) {
+        guard let w = panel, w.isVisible, !lastPanel.isNull, lastPanel.contains(p) || lastPanel.insetBy(dx: -6, dy: -6).contains(p) else { return }
+        // A press on the title bar or an edge starts a move or resize: hide until mouse up.
+        let onButton = w.frame.contains(NSPoint(x: p.x, y: TitleButton.flip(p.y)))
+        let titleBar = p.y < lastPanel.minY + 34
+        let edge = !lastPanel.insetBy(dx: 6, dy: 6).contains(p)
+        if !onButton && (titleBar || edge) { dragging = true; w.orderOut(nil) }
+    }
+
+    func mouseUp() {
+        guard dragging else { return }
+        dragging = false
+        soon()
+    }
+
+    func update() {
+        guard !dragging else { return }
+        guard let (pid, panelRect, preview) = AgentCore.shared.panelAndPreview(), !preview.path.isEmpty else {
+            Agent.log.debug("title button: no Peep preview in the frontmost app's panel")
+            hide(); return
+        }
+        guard let title = TitleButton.titleFrame(pid: pid, panel: panelRect) else {
+            Agent.log.debug("title button: no title element in panel \(String(describing: panelRect), privacy: .public)")
+            hide(); return
+        }
+        lastPanel = panelRect
+        let size: CGFloat = 20
+        // After the title, vertically centered on it (AX and CG: top-left origin; AppKit: bottom-left).
+        let x = title.maxX + 4, yTop = title.midY - size / 2
+        let frame = NSRect(x: x, y: TitleButton.flip(yTop + size), width: size, height: size)
+        let w = panel ?? makePanel()
+        view?.path = preview.path
+        if w.frame != frame { w.setFrame(frame, display: false) }
+        if !w.isVisible { w.orderFrontRegardless() }
+        if timer == nil {
+            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in MainActor.assumeIsolated { self.update() } }
+        }
+    }
+
+    private func hide() {
+        panel?.orderOut(nil)
+        if !dragging { timer?.invalidate(); timer = nil; lastPanel = .null }
+    }
+
+    private func makePanel() -> NSPanel {
+        let w = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 20, height: 20), styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: true)
+        w.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)   // above the QL panel
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.hasShadow = false
+        w.hidesOnDeactivate = false
+        w.becomesKeyOnlyIfNeeded = true
+        w.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
+        let v = CopyPathView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
+        w.contentView = v
+        panel = w
+        view = v
+        return w
+    }
+
+    /// Top-left-origin y (AX, CG) to AppKit's bottom-left origin on the main screen.
+    static func flip(_ y: CGFloat) -> CGFloat { (NSScreen.screens.first?.frame.height ?? 0) - y }
+
+    /// The title text's frame in the Quick Look panel matching `panel` (top-left origin).
+    static func titleFrame(pid: pid_t, panel: CGRect) -> CGRect? {
+        let app = AXUIElementCreateApplication(pid)
+        guard let windows: [AXUIElement] = value(app, kAXWindowsAttribute) else { return nil }
+        for w in windows {
+            guard let f = frame(w), abs(f.minX - panel.minX) < 2, abs(f.minY - panel.minY) < 2,
+                  abs(f.width - panel.width) < 2 else { continue }
+            return findTitle(w, below: f.minY + 34, depth: 0)
+        }
+        return nil
+    }
+
+    private static func findTitle(_ e: AXUIElement, below maxY: CGFloat, depth: Int) -> CGRect? {
+        guard depth < 4, let children: [AXUIElement] = value(e, kAXChildrenAttribute) else { return nil }
+        for c in children {
+            if let role: String = value(c, kAXRoleAttribute), role == kAXStaticTextRole as String,
+               let f = frame(c), f.minY < maxY, f.width > 0 { return f }
+        }
+        for c in children {
+            if let f = frame(c), f.minY > maxY { continue }   // the title is in the title bar
+            if let t = findTitle(c, below: maxY, depth: depth + 1) { return t }
+        }
+        return nil
+    }
+
+    private static func value<T>(_ e: AXUIElement, _ attr: String) -> T? {
+        var v: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, attr as CFString, &v) == .success else { return nil }
+        return v as? T
+    }
+
+    private static func frame(_ e: AXUIElement) -> CGRect? {
+        guard let pv: AXValue = value(e, kAXPositionAttribute), let sv: AXValue = value(e, kAXSizeAttribute) else { return nil }
+        var p = CGPoint.zero, s = CGSize.zero
+        guard AXValueGetValue(pv, .cgPoint, &p), AXValueGetValue(sv, .cgSize, &s) else { return nil }
+        return CGRect(origin: p, size: s)
+    }
+}
+
+/// The button: a copy icon (a checkmark for a moment after copying), highlighted on hover.
+final class CopyPathView: NSView {
+    var path = ""
+    private var hover = false
+    private var copiedUntil: TimeInterval = 0
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        toolTip = "Copy path"
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
+
+    override func mouseDown(with event: NSEvent) {
+        Agent.log.debug("title button: click (path \(self.path.isEmpty ? "empty" : "set", privacy: .public))")
+        guard !path.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+        copiedUntil = ProcessInfo.processInfo.systemUptime + 1.2
+        needsDisplay = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.25) { [weak self] in self?.needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hover {
+            NSColor.labelColor.withAlphaComponent(0.1).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5).fill()
+        }
+        let copied = ProcessInfo.processInfo.systemUptime < copiedUntil
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [copied ? .systemGreen : (hover ? .labelColor : .secondaryLabelColor)]))
+        guard let img = NSImage(systemSymbolName: copied ? "checkmark" : "doc.on.doc", accessibilityDescription: "Copy path")?
+            .withSymbolConfiguration(cfg) else { return }
+        let s = img.size
+        img.draw(in: NSRect(x: (bounds.width - s.width) / 2, y: (bounds.height - s.height) / 2, width: s.width, height: s.height))
     }
 }

@@ -93,7 +93,7 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
         reportedSize = view.bounds.size
         AgentClient.shared.sendState(id: agentID, size: reportedSize, visible: visible,
                                      find: preview.isFinding, selection: preview.documentView.hasSelection,
-                                     matches: preview.hasMatches)
+                                     matches: preview.hasMatches, path: preview.document?.path ?? "")
     }
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
