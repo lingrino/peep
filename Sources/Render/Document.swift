@@ -1,9 +1,6 @@
 import AppKit
 import Darwin
 
-/// Monotonic nanoseconds (for pipeline timing).
-@inline(__always) public func nanotime() -> UInt64 { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) }
-
 /// A file turned into something displayable, plus how long each stage took.
 @MainActor
 public final class Document {
@@ -39,17 +36,31 @@ public final class Document {
             times.append((name, n - t))
             t = n
         }
+        var name = (path as NSString).lastPathComponent
+        // Archives are listed from their headers, never loaded whole.
+        if let kind = ArchiveKind.of(fileName: name) { return openArchive(path: path, name: name, kind: kind, typography: typography) }
         let isLog = path.lowercased().hasSuffix(".log")
-        let file: LoadedFile
-        do {
-            file = try FileLoader.load(path: path, limit: maxBytes, tail: isLog)
-        } catch {
-            return message("Couldn't read this file.", fileSize: 0)
+        var file: LoadedFile
+        var compressedNotice: String?
+        if let (inner, gzip) = SingleFileCompression.inner(of: name) {
+            // ".log.gz", "data.json.xz": preview what's inside, decompressed within a budget.
+            guard let (buf, more, stored) = SingleFileCompression.load(path: path, gzip: gzip, limit: maxBytes,
+                                                                        budgetNanos: decompressBudget) else {
+                return message("Couldn't decompress this file.", fileSize: 0)
+            }
+            name = stored.flatMap { $0.isEmpty ? nil : ($0 as NSString).lastPathComponent } ?? inner
+            file = LoadedFile(raw: buf, fileSize: buf.count + (more ? 1 : 0))
+            if more { compressedNotice = "First \(byteCount(buf.count)) of the decompressed file" }
+        } else {
+            do {
+                file = try FileLoader.load(path: path, limit: maxBytes, tail: isLog)
+            } catch {
+                return message("Couldn't read this file.", fileSize: 0)
+            }
         }
         mark("read")
         let decoded = Decoder.decode(file.raw, truncated: file.truncated)
         mark("decode")
-        let name = (path as NSString).lastPathComponent
         var text: TextBuffer
         var lang: Language
         switch decoded {
@@ -91,6 +102,8 @@ public final class Document {
         var notice: String?
         if lang == .hexdump && file.fileSize > HexDump.limit {
             notice = "First \(byteCount(HexDump.limit)) of \(byteCount(file.fileSize))"
+        } else if let c = compressedNotice {
+            notice = c
         } else if file.truncated {
             notice = "\(file.offset > 0 ? "Last" : "First") \(byteCount(file.raw.count)) of \(byteCount(file.fileSize))"
         }
@@ -161,6 +174,51 @@ public final class Document {
                     content.setTokens(full)
                     doc.timings.append(("lex-bg", ns))
                     doc.onUpdate?()
+                }
+            }
+        }
+        return doc
+    }
+
+    /// Time allowed for decompressing a single compressed file before the preview shows what
+    /// it has (the notice says it's the first part).
+    static let decompressBudget: UInt64 = 40_000_000
+
+    /// Lists an archive: 25 ms of reading now; a listing that isn't done by then shows what it
+    /// has and is replaced when the background pass finishes (big tarballs must be decoded).
+    static func openArchive(path: String, name: String, kind: ArchiveKind, typography: Typography) -> Document {
+        let t0 = nanotime()
+        let listing = ArchiveReader.list(path: path, kind: kind, budgetNanos: 25_000_000)
+        let t1 = nanotime()
+        // Rendering (folder tree, sort) is ~0.2 µs per entry: huge listings render off the
+        // first frame, which shows a one-line placeholder.
+        let deferRender = listing.complete && listing.count > 25_000
+        var shown = listing
+        if deferRender {
+            shown = ArchiveListing(kind: kind)
+            shown.fileSize = listing.fileSize
+            shown.pendingEntries = listing.count
+            shown.complete = false
+        }
+        let (text, tokens) = shown.render(title: name)
+        let lines = LineIndex(text)
+        let t2 = nanotime()
+        let content = CodeContent(text: text, lines: lines, tokens: tokens, language: .plain, typography: typography,
+                                  lineNumbers: false)
+        let doc = Document(kind: .code(.plain), content: content, fileSize: Int(listing.fileSize), truncated: false)
+        doc.timings = [("list", t1 - t0), ("render", t2 - t1)]
+        doc.path = path
+        if !listing.complete || deferRender {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let t0 = nanotime()
+                let full = deferRender ? listing : ArchiveReader.list(path: path, kind: kind, budgetNanos: 0)
+                let (t, k) = full.render(title: name)
+                let li = LineIndex(t)
+                let ns = nanotime() - t0
+                DispatchQueue.main.async {
+                    content.replace(text: t, lines: li, tokens: k)
+                    doc.timings.append(("list-bg", ns))
+                    doc.onContentReplaced?()
                 }
             }
         }

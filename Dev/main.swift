@@ -152,6 +152,11 @@ func types(_ args: [String]) {
             add(dynamicUTI(e))
         }
     }
+    // Archives (listed) and single compressed files (previewed decompressed).
+    for e in ArchiveKind.registeredExtensions {
+        if let t = UTType(filenameExtension: e), !t.isDynamic, !exclude.contains(t.identifier) { add(t.identifier) }
+        add(dynamicUTI(e))
+    }
     // Wrapper suffixes (config.yml.dist, Makefile.in): one type each, whatever they wrap.
     for e in Language.wrapperExtensions.sorted() {
         if let t = UTType(filenameExtension: e), !t.isDynamic, !exclude.contains(t.identifier) { add(t.identifier) }

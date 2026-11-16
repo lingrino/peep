@@ -34,7 +34,7 @@ public enum JSONFormatter {
     /// the full output's beginning, except possibly its last line).
     public static func format(_ t: TextBuffer, count n: Int) -> TextBuffer {
         let p = UnsafePointer(t.base)
-        var out = Output(capacity: n + n / 2 + 4096)
+        var out = ByteOutput(capacity: n + n / 2 + 4096)
         var depth = 0
         var afterTopValue = false   // a complete value at depth 0 was written
         var i = 0
@@ -75,17 +75,17 @@ public enum JSONFormatter {
                 }
                 out.byte(c)
                 depth &+= 1
-                out.newline(depth)
+                out.newline(depth, maxDepth: maxIndentDepth)
                 i &+= 1
             case 0x7D, 0x5D:   // } ]
                 depth = max(0, depth &- 1)
-                if out.count > 0 { out.newline(depth) }
+                if out.count > 0 { out.newline(depth, maxDepth: maxIndentDepth) }
                 out.byte(c)
                 i &+= 1
                 if depth == 0 { afterTopValue = true }
             case 0x2C:   // ,
                 out.byte(c)
-                out.newline(depth)
+                out.newline(depth, maxDepth: maxIndentDepth)
                 i &+= 1
             case 0x3A:   // :
                 out.byte(c)
@@ -106,58 +106,5 @@ public enum JSONFormatter {
         }
         out.byte(0x0A)
         return out.finish()
-    }
-
-    /// Growable output with TextBuffer's padding contract.
-    struct Output {
-        var base: UnsafeMutablePointer<UInt8>
-        var count = 0
-        var capacity: Int
-        /// "\n" followed by spaces: a newline plus indentation is one memcpy.
-        nonisolated(unsafe) static let indent: UnsafeMutablePointer<UInt8> = {
-            let m = 1 + 2 * JSONFormatter.maxIndentDepth
-            let p = UnsafeMutablePointer<UInt8>.allocate(capacity: m)
-            p[0] = 0x0A
-            (p + 1).initialize(repeating: 0x20, count: m - 1)
-            return p
-        }()
-
-        init(capacity: Int) {
-            self.capacity = capacity
-            base = TextBuffer.allocate(capacity)
-        }
-
-        @inline(__always) mutating func reserve(_ k: Int) {
-            if count &+ k <= capacity { return }
-            var c = capacity * 2
-            while c < count + k { c *= 2 }
-            let nb = TextBuffer.allocate(c)
-            memcpy(nb, base, count)
-            base.deallocate()
-            base = nb
-            capacity = c
-        }
-
-        @inline(__always) mutating func byte(_ b: UInt8) {
-            reserve(1)
-            base[count] = b
-            count &+= 1
-        }
-
-        @inline(__always) mutating func bytes(_ p: UnsafePointer<UInt8>, _ k: Int) {
-            reserve(k)
-            memcpy(base + count, p, k)
-            count &+= k
-        }
-
-        @inline(__always) mutating func newline(_ depth: Int) {
-            bytes(Output.indent, 1 + 2 * min(depth, JSONFormatter.maxIndentDepth))
-        }
-
-        /// Hands the bytes to a TextBuffer (zeroing the padding after the content).
-        mutating func finish() -> TextBuffer {
-            (base + count).initialize(repeating: 0, count: TextBuffer.padding)
-            return TextBuffer(owning: base, count: count)
-        }
     }
 }
