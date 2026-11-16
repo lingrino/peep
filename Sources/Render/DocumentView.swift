@@ -274,10 +274,15 @@ public final class DocumentView: NSView {
         }
     }
 
+    /// Cumulative tile draws (count, ns), for `peep-dev jumpbench` and debugging.
+    public private(set) var tileDrawStats: (count: Int, nanos: UInt64) = (0, 0)
+
     func render(tile: TileView, ctx: CGContext, dirty: NSRect) {
         guard let c = content else { return }
         let t0 = nanotime()
         defer {
+            tileDrawStats.count += 1
+            tileDrawStats.nanos += nanotime() - t0
             if contentSetAt != 0 {
                 drawNanos += nanotime() - t0
                 tilesDrawnSinceSet += 1
@@ -369,7 +374,11 @@ public final class DocumentView: NSView {
         return CGPoint(x: p.x - (content?.gutterWidth ?? 0), y: p.y)
     }
 
+    /// Every mouse-down, before handling (PreviewView uses it to calibrate early clicks).
+    var onMouseDownEvent: ((NSEvent) -> Void)?
+
     public override func mouseDown(with event: NSEvent) {
+        onMouseDownEvent?(event)
         guard let c = content else { return }
         let p = contentPoint(event)
         if event.clickCount == 1, let link = c.link(at: p), !event.modifierFlags.contains(.shift) {

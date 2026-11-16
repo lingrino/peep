@@ -74,9 +74,21 @@ final class OutlineView: NSView {
         }
     }
 
-    fileprivate func clicked(row: Int) {
-        guard row >= 0 && row < indexMap.count else { return }
+    /// Asked first for every delivered mouse-down; true = already handled (early click).
+    var lateClickHandled: ((NSEvent) -> Bool)?
+
+    @discardableResult
+    fileprivate func clicked(row: Int) -> Bool {
+        guard row >= 0 && row < indexMap.count else { return false }
         onSelect?(indexMap[row])
+        return true
+    }
+
+    /// A click at `p` (this view's coordinates) reported early by the agent. True if it hit a row.
+    func click(at p: CGPoint) -> Bool {
+        let lp = list.convert(p, from: self)
+        guard list.visibleRect.contains(lp) else { return false }
+        return clicked(row: list.row(at: lp))
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -156,10 +168,11 @@ final class OutlineList: NSView {
         }
     }
 
+    func row(at p: CGPoint) -> Int { Int(((p.y - top - 20) / rowHeight).rounded(.down)) }
+
     override func mouseDown(with event: NSEvent) {
-        let p = convert(event.locationInWindow, from: nil)
-        let row = Int((p.y - top - 20) / rowHeight)
-        owner?.clicked(row: row)
+        if owner?.lateClickHandled?(event) == true { return }
+        owner?.clicked(row: row(at: convert(event.locationInWindow, from: nil)))
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }

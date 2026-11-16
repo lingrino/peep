@@ -29,9 +29,12 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
         ImageStore.remoteFetch = { url, done in AgentClient.shared.fetch(url, done) }
         preview = PreviewView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         view = preview
-        agentID = AgentClient.shared.register { [weak self] code, chars, mods in
+        agentID = AgentClient.shared.register({ [weak self] code, chars, mods in
             self?.preview.handleKey(code: code, chars: chars, mods: mods)
-        }
+        }, click: { [weak self] point, panel, ts in
+            self?.earlyClick(point, panel, ts)
+        })
+        preview.onLateMouseDown = { [weak self] e in self?.calibrate(e) }
         preview.onStateChange = { [weak self] in self?.report() }
         preview.onExternalLink = { url in AgentClient.shared.open(url) }
     }
@@ -52,6 +55,37 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
     override func viewDidLayout() {
         super.viewDidLayout()
         if visible && view.bounds.size != reportedSize { report() }
+    }
+
+    // MARK: - Early clicks
+
+    /// Where this preview sits inside the Quick Look panel (offset of its top-left from the
+    /// panel's). Measured from the first click Quick Look delivers; until then a guess:
+    /// centered horizontally, bottom margin equal to the side margins.
+    private static var panelInset: CGPoint?
+    /// Recent clicks forwarded by the agent (timestamp, point in the panel).
+    private var forwarded: [(ts: TimeInterval, point: CGPoint)] = []
+
+    /// A click the agent saw ~0.5 s before Quick Look will deliver it (see Agent.forwardClick).
+    private func earlyClick(_ point: CGPoint, _ panel: CGSize, _ ts: TimeInterval) {
+        forwarded.append((ts, point))
+        if forwarded.count > 8 { forwarded.removeFirst() }
+        let vs = view.bounds.size
+        let side = max(0, (panel.width - vs.width) / 2)
+        let inset = PreviewViewController.panelInset ?? CGPoint(x: side, y: panel.height - vs.height - side)
+        preview.earlyClick(at: CGPoint(x: point.x - inset.x, y: point.y - inset.y), timestamp: ts)
+    }
+
+    /// The late copy of a forwarded click: its exact position in our view fixes the inset.
+    private func calibrate(_ e: NSEvent) {
+        guard let i = forwarded.firstIndex(where: { abs($0.ts - e.timestamp) < 0.01 }) else { return }
+        let local = preview.convert(e.locationInWindow, from: nil)
+        let inset = CGPoint(x: forwarded[i].point.x - local.x, y: forwarded[i].point.y - local.y)
+        forwarded.remove(at: i)
+        if PreviewViewController.panelInset != inset {
+            PreviewViewController.panelInset = inset
+            log.debug("panel inset \(inset.x, format: .fixed(precision: 1)),\(inset.y, format: .fixed(precision: 1))")
+        }
     }
 
     /// Tells the keyboard agent what this preview needs (see Agent.shouldIntercept).

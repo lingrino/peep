@@ -38,6 +38,8 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
    preview is visible in the frontmost app's Quick Look panel (a floating-level window owned by
    the frontmost app whose size matches a reported preview). Intercepts ⌘F, ⌘G/⇧⌘G, ⌘A, ⌘C (with a
    selection), and every key while the find bar is open. Everything else passes through.
+   It also forwards (without consuming) single clicks in the panel, which Quick Look would
+   otherwise deliver ~0.5 s late (see Quick Look facts).
    It also opens links (sandbox forbids `NSWorkspace.open`) and fetches remote images (Quick
    Look's sandbox denies outbound connections even with `network.client`).
 3. **Peep.app** — `Sources/App/HostApp.swift`. Opening it shows setup status (extension,
@@ -75,6 +77,7 @@ Scripts/dev.sh smoke <dirs/files...>  # open+draw+scroll+find every file; crashe
 Scripts/dev.sh parsebench <file.md|dir> [N]   # markdown parse throughput (dir: MB/s by file size, slowest files)
 Scripts/dev.sh mddump <outdir> <files/dirs...>  # full dump per parsed .md: diff -r old/new dumps around parser changes
 Scripts/dev.sh findbench <file> <query...>  # raw search vs full find path per query
+Scripts/dev.sh jumpbench <file.md...>      # table-of-contents jump cost (scroll + tile draws)
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
@@ -191,6 +194,14 @@ as a fix with a test), and stay clean under `-sanitize=address`.
 - Killing the extension while a panel shows it (every install does) leaves that panel in a
   "failed during preview" state; close it and move the selection to recover. Not a bug.
 - Remote view frames reported to the extension are synthetic; only sizes are meaningful.
+- Clicks reach the extension **~510 ms late** (measured against the agent's event tap on the
+  same clock): Quick Look holds every mouse-down/up for the double-click interval, because a
+  double-click in the panel opens the file in its default app. Selection drags are unaffected
+  in feel, but table-of-contents clicks were. The agent therefore also taps left mouse-down
+  (never consuming it) and forwards single clicks inside the panel with their timestamp;
+  `PreviewView.earlyClick` handles outline rows at once (~1 ms) and drops the late copy by
+  timestamp. The panel-to-view offset is calibrated from the late copy (5, 38 pt on macOS 27).
+  Measure with `peep-dev jumpbench` (in-process cost) and the "early click handled" debug log.
 - Cursor: only cursor *rects* reach the screen (`NSCursor.set()` is dropped). The rect's cursor
   applies when the mouse enters it; a panel opening under a still mouse shows the arrow until
   it crosses a rect edge. Overlapping rects show the arrow, and moving between adjacent rects

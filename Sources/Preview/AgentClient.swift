@@ -11,21 +11,27 @@ final class AgentClient {
     static let service = "com.lingrino.peep.agent"
 
     typealias KeyHandler = (_ code: UInt16, _ chars: String, _ mods: UInt64) -> Void
+    /// A click the agent saw in the Quick Look panel: point from the panel's top-left, panel
+    /// size, and the event's timestamp (the late copy Quick Look delivers carries the same).
+    typealias ClickHandler = (_ point: CGPoint, _ panel: CGSize, _ timestamp: TimeInterval) -> Void
     private var conn: xpc_connection_t?
     private var handlers: [UInt64: KeyHandler] = [:]
+    private var clickHandlers: [UInt64: ClickHandler] = [:]
     /// Last state sent per preview, replayed if the agent restarts.
     private var states: [UInt64: xpc_object_t] = [:]
     private var nextID: UInt64 = 1
 
-    func register(_ handler: @escaping KeyHandler) -> UInt64 {
+    func register(_ handler: @escaping KeyHandler, click: @escaping ClickHandler) -> UInt64 {
         let id = nextID
         nextID += 1
         handlers[id] = handler
+        clickHandlers[id] = click
         return id
     }
 
     func unregister(_ id: UInt64) {
         handlers[id] = nil
+        clickHandlers[id] = nil
         states[id] = nil
     }
 
@@ -87,9 +93,16 @@ final class AgentClient {
             }
             return
         }
-        guard type == XPC_TYPE_DICTIONARY, let t = xpc_dictionary_get_string(msg, "t"), String(cString: t) == "key" else { return }
+        guard type == XPC_TYPE_DICTIONARY, let tp = xpc_dictionary_get_string(msg, "t") else { return }
+        let t = String(cString: tp)
         let id = xpc_dictionary_get_uint64(msg, "id")
-        let chars = xpc_dictionary_get_string(msg, "chars").map { String(cString: $0) } ?? ""
-        handlers[id]?(UInt16(truncatingIfNeeded: xpc_dictionary_get_uint64(msg, "code")), chars, xpc_dictionary_get_uint64(msg, "mods"))
+        if t == "key" {
+            let chars = xpc_dictionary_get_string(msg, "chars").map { String(cString: $0) } ?? ""
+            handlers[id]?(UInt16(truncatingIfNeeded: xpc_dictionary_get_uint64(msg, "code")), chars, xpc_dictionary_get_uint64(msg, "mods"))
+        } else if t == "click" {
+            clickHandlers[id]?(CGPoint(x: xpc_dictionary_get_double(msg, "x"), y: xpc_dictionary_get_double(msg, "y")),
+                               CGSize(width: xpc_dictionary_get_double(msg, "pw"), height: xpc_dictionary_get_double(msg, "ph")),
+                               xpc_dictionary_get_double(msg, "ts"))
+        }
     }
 }

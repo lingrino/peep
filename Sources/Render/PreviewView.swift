@@ -35,6 +35,7 @@ public final class PreviewView: NSView {
                                                name: NSView.frameDidChangeNotification, object: scrollView.contentView)
         addSubview(scrollView)
         documentView.onLink = { [weak self] l in self?.handleLink(l) }
+        documentView.onMouseDownEvent = { [weak self] e in _ = self?.lateMouseDown(e) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -111,6 +112,7 @@ public final class PreviewView: NSView {
             if md.doc.headings.count >= 3 {
                 let o = OutlineView(frame: NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height))
                 o.setHeadings(md.doc.headings)
+                o.lateClickHandled = { [weak self] e in self?.lateMouseDown(e) ?? false }
                 o.onSelect = { [weak self, weak md] i in
                     guard let md else { return }
                     md.finishLayout()
@@ -135,6 +137,31 @@ public final class PreviewView: NSView {
         layoutSubtreeIfNeeded()
         lastWidth = scrollView.contentView.bounds.width
         documentView.setContent(doc.content, width: lastWidth)
+    }
+
+    // MARK: - Early clicks
+
+    /// Every mouse-down Quick Look delivers (~0.5 s late), before it is handled.
+    public var onLateMouseDown: ((NSEvent) -> Void)?
+    /// Timestamps of clicks already handled through `earlyClick`.
+    private var earlyHandled: [TimeInterval] = []
+
+    /// A click reported by the keyboard agent before Quick Look delivers it. `local` is in
+    /// this view's coordinates. Table-of-contents clicks are handled now; everything else
+    /// waits for the real event (drags, selection and links need the full event stream).
+    public func earlyClick(at local: CGPoint, timestamp: TimeInterval) {
+        guard let o = outline, !o.isHidden, o.frame.contains(local), o.click(at: convert(local, to: o)) else { return }
+        renderLog.debug("early click handled \((ProcessInfo.processInfo.systemUptime - timestamp) * 1000, format: .fixed(precision: 1))ms after the event")
+        earlyHandled.append(timestamp)
+        if earlyHandled.count > 8 { earlyHandled.removeFirst() }
+    }
+
+    /// True if this (late) mouse-down was already handled early.
+    private func lateMouseDown(_ e: NSEvent) -> Bool {
+        onLateMouseDown?(e)
+        guard let i = earlyHandled.firstIndex(where: { abs($0 - e.timestamp) < 0.01 }) else { return false }
+        earlyHandled.remove(at: i)
+        return true
     }
 
     // MARK: - Find

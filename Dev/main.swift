@@ -550,6 +550,45 @@ func findBench(_ args: [String]) {
     }
 }
 
+/// Table-of-contents clicks: jump to each heading and draw what becomes visible. Prints the
+/// worst and median click cost (scroll + tile draws) and tiles drawn per click.
+@MainActor
+func jumpBench(_ args: [String]) {
+    let size = NSSize(width: 990, height: 760)
+    let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: size.width, height: size.height),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    let view = PreviewView(frame: NSRect(origin: .zero, size: size))
+    window.contentView = view
+    window.orderFrontRegardless()
+    for f in args {
+        let doc = Document.open(path: f)
+        view.show(doc)
+        guard let md = doc.content as? MarkdownContent else { print("not markdown"); continue }
+        md.finishLayout()
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+        for t in view.documentView.subviews { t.layer?.displayIfNeeded() }
+        var times: [Double] = [], draws: [Int] = []
+        let n = md.headingY.count
+        let order = (0..<n).map { ($0 * 7919) % max(1, n) }   // scattered jumps, like real clicks
+        for i in order {
+            let before = view.documentView.tileDrawStats
+            let t0 = nanotime()
+            view.documentView.scrollToTop(y: md.headingY[i] - 12)
+            view.displayIfNeeded()
+            // Offscreen windows don't display layer-backed tiles on their own.
+            for t in view.documentView.subviews { t.layer?.displayIfNeeded() }
+            times.append(Double(nanotime() - t0) / 1e6)
+            draws.append(view.documentView.tileDrawStats.count - before.count)
+        }
+        times.sort()
+        let med = times.isEmpty ? 0 : times[times.count / 2]
+        print(String(format: "%@: %d jumps, median %.2fms, worst %.2fms, tiles/jump %.1f",
+                     (f as NSString).lastPathComponent, times.count, med, times.last ?? 0,
+                     Double(draws.reduce(0, +)) / Double(max(1, draws.count))))
+    }
+}
+
 /// Boxes whose line baselines fall outside their rect, or that overlap the next block.
 @MainActor
 func mdGeometryErrors(_ md: MarkdownContent) -> [String] {
@@ -590,6 +629,7 @@ MainActor.assumeIsolated {
     case "smoke": smoke(Array(args.dropFirst()))
     case "firstpaint": firstPaint(Array(args.dropFirst()))
     case "findbench": findBench(Array(args.dropFirst()))
+    case "jumpbench": jumpBench(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
     case "parsebench": parsebench(Array(args.dropFirst()))
     case "mddump": mdDump(Array(args.dropFirst()))

@@ -160,7 +160,7 @@ final class AgentCore {
     }
 
     private func installTap() -> Bool {
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
         guard let t = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                         eventsOfInterest: mask, callback: { _, type, event, _ in
             MainActor.assumeIsolated { AgentCore.shared.tapped(type, event) }
@@ -175,13 +175,18 @@ final class AgentCore {
         return true
     }
 
-    /// Runs for every keystroke system-wide: the no-preview path must stay trivial.
+    /// Runs for every keystroke and mouse-down system-wide: the no-preview path must stay trivial.
     private func tapped(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
-        if previews.isEmpty || type != .keyDown { return Unmanaged.passUnretained(event) }
+        if previews.isEmpty { return Unmanaged.passUnretained(event) }
+        if type == .leftMouseDown {
+            if event.getIntegerValueField(.mouseEventClickState) == 1 { forwardClick(event) }
+            return Unmanaged.passUnretained(event)   // never consumed: Quick Look still delivers it (late)
+        }
+        if type != .keyDown { return Unmanaged.passUnretained(event) }
         let t = target()
         if event.flags.contains(.maskCommand) {
             // Debug aid (no characters are ever logged): why a ⌘-key was or wasn't taken.
@@ -242,6 +247,23 @@ final class AgentCore {
             return CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0, width: width, height: height)
         }
         return nil
+    }
+
+    /// Quick Look hands clicks to the extension only after the double-click interval (~510 ms,
+    /// measured against this tap). Forwarding single clicks in the panel lets the extension act
+    /// on them at once; it matches the late copy by its original timestamp and ignores it.
+    private func forwardClick(_ e: CGEvent) {
+        guard let p = target(), let panel = panelCache.rect, panel.contains(e.location),
+              let ts = NSEvent(cgEvent: e)?.timestamp else { return }
+        let msg = xpc_dictionary_create(nil, nil, 0)
+        xpc_dictionary_set_string(msg, "t", "click")
+        xpc_dictionary_set_uint64(msg, "id", p.id)
+        xpc_dictionary_set_double(msg, "x", e.location.x - panel.minX)   // from the panel's top-left
+        xpc_dictionary_set_double(msg, "y", e.location.y - panel.minY)
+        xpc_dictionary_set_double(msg, "pw", panel.width)
+        xpc_dictionary_set_double(msg, "ph", panel.height)
+        xpc_dictionary_set_double(msg, "ts", ts)
+        xpc_connection_send_message(p.conn, msg)
     }
 
     private func send(_ e: CGEvent, to p: Preview) {
