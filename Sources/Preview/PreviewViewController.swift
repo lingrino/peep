@@ -60,9 +60,18 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
         log.notice("search field: \(sender.stringValue, privacy: .public)")
     }
 
+    deinit { log.notice("deinit \(ObjectIdentifier(self).hashValue)") }
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        log.notice("viewDidDisappear \(ObjectIdentifier(self).hashValue)")
+    }
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        log.notice("viewDidLayout \(ObjectIdentifier(self).hashValue) size=\(self.view.bounds.size.width)x\(self.view.bounds.size.height) wframe=\(String(describing: self.view.window?.frame), privacy: .public)")
+    }
     override func viewDidAppear() {
         super.viewDidAppear()
-        log.notice("viewDidAppear window=\(String(describing: self.view.window), privacy: .public)")
+        log.notice("viewDidAppear \(ObjectIdentifier(self).hashValue) window=\(String(describing: self.view.window), privacy: .public) wframe=\(String(describing: self.view.window?.frame), privacy: .public) screen=\(String(describing: self.view.window?.screen?.frame), privacy: .public)")
         view.window?.makeFirstResponder(textView)
     }
 
