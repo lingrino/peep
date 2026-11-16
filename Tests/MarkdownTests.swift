@@ -142,6 +142,21 @@ let markdownTests: [Test] = [
         expectMD("<center>\n\n# Title\n\n</center>\n\ntext", ["H1^|Title", "P|text"])
         expectMD("<div>\n\nplain\n\n</div>", ["P|plain"])
     },
+    Test("md: link and image strings") {
+        let d = MarkdownParser.parse(TextBuffer(
+            "<picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"d.png 2x\"><img src=\"l.png\" alt=\"A &amp; B\" width=\"50%\" height=\"20px\"></picture>"
+            + " [x](<u v> \"t\") [y](a\\(b\\)c) <https://a.b> www.c.d <me@x.org>\n\n![alt *em*](i.png)"))
+        expectEqual(d.images.count, 2)
+        let img = d.images[0]
+        expectEqual(img.url, "l.png")
+        expectEqual(img.alt, "A & B")
+        expectEqual(img.width, -50)
+        expectEqual(img.height, 20)
+        expectEqual(img.darkURL, "d.png")
+        expectEqual(d.images[1].alt, "alt em")
+        expectEqual(d.images[1].darkURL, nil)
+        expectEqual(Array(d.links), ["u v", "a(b)c", "https://a.b", "http://www.c.d", "mailto:me@x.org"])
+    },
     Test("md: html tag names match exactly") {
         expectMD("<STRONG>a</STRONG> <a2>b</a2> <h7>c</h7> <Kbd>k</Kbd> <code>x</code>", [
             "P|**a** b c <kbd>k</kbd> `x`",

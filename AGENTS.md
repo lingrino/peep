@@ -50,11 +50,11 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 |---|---|
 | `Sources/Core/Text/` | `TextBuffer` (padded bytes), `FileLoader`, `Decoder` (encodings/binary), `LineIndex` (SIMD), `Search` (SIMD), `SIMD.swift` helpers, `HexDump` |
 | `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, markdown source), `Language` (detection table + dispatch) |
-| `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset), `MarkdownParser` (assembly), `MarkdownModel` (flat output), `Entities` |
+| `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities` |
 | `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline), `Prewarm` (launch-time warm-up) |
 | `Sources/Preview/` | `main.swift` (starts `Prewarm`, then `NSExtensionMain`), principal class `PreviewViewController`, `AgentClient` |
 | `Sources/App/` | Host app, agent |
-| `Dev/` | `peep-dev` tool: `render`, `bench`, `lexbench`, `parsebench`, `mdbench`, `firstpaint`, `findbench`, `smoke`, `tokens`, `layout`, `types`, `icon` |
+| `Dev/` | `peep-dev` tool: `render`, `bench`, `lexbench`, `parsebench`, `mddump`, `mdbench`, `firstpaint`, `findbench`, `smoke`, `tokens`, `layout`, `types`, `icon` |
 | `Tests/` | Zero-dependency test harness + tests (text, search, lexers, markdown) |
 | `Bundle/` | Info.plists, entitlements |
 | `Scripts/` | build/test/dev/profile/signing/type generation |
@@ -72,7 +72,8 @@ Scripts/dev.sh lexbench <file> [N]    # lexer-only throughput
 Scripts/dev.sh layout <file.md> [w]   # markdown block/box dump (+ geometry self-check)
 Scripts/dev.sh firstpaint <files...>  # main-thread cost to first frame: open/show/layout/draw
 Scripts/dev.sh smoke <dirs/files...>  # open+draw+scroll+find every file; crashes, geometry, slowest
-Scripts/dev.sh parsebench <file.md> [N]   # markdown parse throughput
+Scripts/dev.sh parsebench <file.md|dir> [N]   # markdown parse throughput (dir: MB/s by file size, slowest files)
+Scripts/dev.sh mddump <outdir> <files/dirs...>  # full dump per parsed .md: diff -r old/new dumps around parser changes
 Scripts/dev.sh findbench <file> <query...>  # raw search vs full find path per query
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
@@ -128,34 +129,55 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   edge; a long line with one non-ASCII character must not be shaped whole per tile.
 - Core Text applies a paragraph style's extra line height above the first line too; `TextBox`
   shifts it away so a box starts at its first line's top.
+- Markdown parse is copy-once: block content is parsed straight from the source when its lines
+  are contiguous there (else gathered once), inline text nodes are byte ranges into that input,
+  and emit copies source -> output with inline 16-byte vector copies. That input must be padded
+  (the source TextBuffer or a `ByteBuf`): the tokenizer's SIMD skip and the copies read up to 16
+  bytes past the end. Link/image strings are ranges in one store (`MDLinks`/`MDImages` make
+  Strings on access); reference labels are normalized into a reused buffer and probed in an
+  open-addressing table. Working buffers are `RawArray`/`ByteBuf` in a per-parse stack arena
+  (Swift `Array.append` checks uniqueness through a runtime call per append).
 - Markdown parse hot spots were never the obvious ones: per-paragraph scratch copies (reference
   definitions), header-cell splitting on every second line (tables), `Character`-level Unicode
-  checks (slugs), `String.contains` (titles), `Language.named` lowercasing per code fence.
-  Prefilter on bytes before doing real work.
+  checks (slugs: a Unicode slug per heading cost more than parsing it, so `headingSlugs()` is
+  computed on demand), `utf8.contains(0xEF)` (a generic iterator that also matches every emoji
+  with a variation selector), `Language.named` hashing per code fence (SipHash: now a
+  multiply-shift table), a libc `memmove` per 30-byte URL. Prefilter on bytes before doing real
+  work; measure the whole corpus (`parsebench <dir>`), not one file.
+- A search for each line's end mispredicted its exit on most lines; `newlineOffsets` finds all
+  of them in one branch-light pass (64-byte masks, flattened as in `LineIndex`).
 
 ## Benchmarks and the bar
 
 The owner set pierre's Wasm `highlights` and `words` (pierrecomputer/pierre) as the *minimum*
 bar. Their published numbers (Apple M4 Pro / M5 Max): highlights TS → tokens 225 MiB/s
 (→ HTML 354; HTML/JSONC ~1,000); words Markdown → HTML ~930 MiB/s on the 211 KiB GFM spec,
-500–1,280 MiB/s on small files. Ours (`peep-dev lexbench` / `parsebench`, best of N):
+500–1,280 MiB/s on small files. Ours (`peep-dev lexbench` / `parsebench`, best of N; Peep in
+MB/s = 10^6 B/s, the bar in MiB/s = 2^20 B/s, so 930 MiB/s = 975 MB/s):
 
 | Input | Peep | Bar |
 |---|---:|---:|
-| TypeScript (93 KB) lex | 1,760 MB/s | 225 |
+| TypeScript (93 KB) lex | 1,760 MB/s | 225 MiB/s |
 | Java / Swift / Rust lex | 1,600–2,700 MB/s | — |
 | C (520 KB) / lodash.js lex | 630 / 1,160 MB/s | — |
 | minified jQuery lex | 318 MB/s | — |
-| CommonMark spec (206 KB) parse | 349 MB/s | ~930 |
-| link-list README (78 KB) parse | 232 MB/s | — |
-| 3 KB README (HTML + ref defs) parse | 174 MB/s | 500+ |
+| CommonMark spec (206 KB) parse | 1,610 MB/s | ~930 MiB/s |
+| link-list README (78 KB) parse | 1,140 MB/s | — |
+| 3 KB README (HTML + ref defs) parse | 750 MB/s | 500+ MiB/s |
+| 653 real .md files by size: < 2 KB / 2–8 / 8–64 / ≥ 64 KB | 970 / 1,180 / 1,185 / 1,080 MB/s | 500+ MiB/s (small) |
 
-Lexing clears the bar. **Markdown parsing does not (≈3× short).** The remaining cost is
-structural, not hot spots: block scanning ~30%, inline tokenize ~25%, gather/emit copies
-~25%, allocation ~10%; skipping plain text with SIMD bought only 2% (tried, reverted). Closing
-the gap means a redesign: one pass from source to output without the per-block gather copy,
-link/image/ref strings as byte ranges instead of `String`s, a flatter node list. In absolute
-terms a typical README parses in 0.02–0.35 ms, so this matters mostly for 100 KB+ documents.
+Both clear the bar. Markdown parsing was ≈3× short (349 MB/s on the spec) until the
+copy-once redesign described under Performance rules (the old parser on the same 653 files:
+212 / 261 / 278 / 289 MB/s). Slowest left: files under ~200 bytes (fixed cost ≈0.3 µs per
+parse: the document object, two TextBuffers, result arrays), nested-list changelogs (~450 MB/s:
+container matching per line, a block per 10-byte item) and a 1.3 KB kitchen-sink README with
+every feature once (~400 MB/s). The block pass (per-line container/leaf dispatch) is now the
+largest share of the spec; inline tokenize + emit are next.
+
+The corpus behind these numbers is local (not in the repo): a few hundred .md files from
+package caches and Homebrew, plus the spec. Any parser change must keep `mddump` output
+identical over such a corpus and over random/mutated documents (or explain each difference
+as a fix with a test), and stay clean under `-sanitize=address`.
 
 ## Quick Look facts (verified on macOS 27)
 
