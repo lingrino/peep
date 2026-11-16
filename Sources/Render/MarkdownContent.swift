@@ -78,7 +78,7 @@ public final class MarkdownContent: DocumentContent {
         results.reserveCapacity(n)
         var y: CGFloat = 0
         var k = 0
-        while k < n && y < MarkdownContent.syncBudget {
+        while k < n && y < syncHeight {
             let r = MarkdownLayout.block(k, env)
             y += r.height + m.gap
             results.append(r)
@@ -121,8 +121,11 @@ public final class MarkdownContent: DocumentContent {
         }
     }
 
-    /// Content laid out synchronously before first paint (points).
-    static let syncBudget: CGFloat = 2400
+    /// Content laid out synchronously before first paint (points): the viewport plus a
+    /// little, so the first frame is exact and nothing more is done before it.
+    private var syncHeight: CGFloat = 1200
+
+    public func setViewportHeight(_ h: CGFloat) { syncHeight = max(400, h + 160) }
 
     private var generation = 0
     private var pending: PendingLayout?

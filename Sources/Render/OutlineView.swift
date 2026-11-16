@@ -14,7 +14,7 @@ final class OutlineView: NSView {
     private let edge = CALayer()   // hairline separating the sidebar from the document
     private let scroll = NSScrollView()
     private let list = OutlineList()
-    private(set) var items: [Item] = []
+    fileprivate(set) var items: [Item] = []
     var onSelect: ((Int) -> Void)?
 
     static let width: CGFloat = 230
@@ -65,8 +65,11 @@ final class OutlineView: NSView {
     func setCurrent(heading: Int) {
         let row = indexMap.lastIndex { $0 <= heading } ?? -1
         if row != list.current {
+            // Repaint just the two rows whose highlight changed (a full redraw on every
+            // section change while scrolling cost 1.5-4 ms on long outlines).
+            if list.current >= 0 { list.setNeedsDisplay(list.rowRect(list.current)) }
             list.current = row
-            list.needsDisplay = true
+            if row >= 0 { list.setNeedsDisplay(list.rowRect(row)) }
             if row >= 0 { list.scrollToVisible(list.rowRect(row).insetBy(dx: 0, dy: -24)) }
         }
     }
@@ -99,26 +102,57 @@ final class OutlineList: NSView {
         NSRect(x: 8, y: top + 20 + CGFloat(i) * rowHeight, width: bounds.width - 16, height: rowHeight)
     }
 
+    private static let titleFont = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+    private static let itemFont = NSFont.systemFont(ofSize: 12)
+    /// Lines take their color from the context, so appearance changes need no rebuild.
+    private static func line(_ s: String, font: NSFont, kern: CGFloat = 0) -> CTLine {
+        CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: [
+            .font: font, .kern: kern,
+            NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
+        ]))
+    }
+    private lazy var header = OutlineList.line("CONTENTS", font: .systemFont(ofSize: 10.5, weight: .semibold), kern: 0.6)
+    private lazy var ellipsis = OutlineList.line("…", font: OutlineList.itemFont)
+
+    /// Rows are Core Text lines built on first draw and drawn with CTLineDraw: the first
+    /// frame of a 197-heading outline took 6 ms through NSAttributedString.draw (TextKit).
     override func draw(_ dirtyRect: NSRect) {
-        guard let owner else { return }
-        let header = NSAttributedString(string: "CONTENTS", attributes: [
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: NSColor.tertiaryLabelColor, .kern: 0.6])
-        header.draw(at: NSPoint(x: 18, y: top))
-        for (i, item) in owner.items.enumerated() {
+        guard let owner, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)   // flipped view
+        if dirtyRect.minY < top + 20 {
+            ctx.setFillColor(NSColor.tertiaryLabelColor.cgColor)
+            ctx.textPosition = CGPoint(x: 18, y: top + 10)
+            CTLineDraw(header, ctx)
+        }
+        let n = owner.items.count
+        if n == 0 { return }
+        let first = max(0, Int((dirtyRect.minY - top - 20) / rowHeight))
+        let last = min(n - 1, Int((dirtyRect.maxY - top - 20) / rowHeight))
+        if first > last { return }
+        for i in first...last {
             let r = rowRect(i)
-            if !r.intersects(dirtyRect) { continue }
+            let level = owner.items[i].level
             let isCurrent = i == current
             if isCurrent {
                 NSColor.controlAccentColor.withAlphaComponent(0.15).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
             }
-            let font = item.level == 0 ? NSFont.systemFont(ofSize: 12.5, weight: .medium) : NSFont.systemFont(ofSize: 12)
-            let color: NSColor = isCurrent ? .controlAccentColor : item.level == 0 ? .labelColor : .secondaryLabelColor
-            let ps = NSMutableParagraphStyle()
-            ps.lineBreakMode = .byTruncatingTail
-            let x = r.minX + 10 + CGFloat(item.level) * 12
-            NSAttributedString(string: item.title, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: ps])
-                .draw(in: NSRect(x: x, y: r.minY + (rowHeight - 16) / 2, width: r.maxX - x - 6, height: 17))
+            let font = level == 0 ? OutlineList.titleFont : OutlineList.itemFont
+            let x = r.minX + 10 + CGFloat(level) * 12
+            let line: CTLine
+            if let l = owner.items[i].line { line = l } else {
+                var l = OutlineList.line(owner.items[i].title, font: font)
+                let avail = Double(r.maxX - x - 6)
+                if CTLineGetTypographicBounds(l, nil, nil, nil) > avail {
+                    l = CTLineCreateTruncatedLine(l, avail, .end, ellipsis) ?? l
+                }
+                owner.items[i].line = l
+                line = l
+            }
+            let color: NSColor = isCurrent ? .controlAccentColor : level == 0 ? .labelColor : .secondaryLabelColor
+            ctx.setFillColor(color.cgColor)
+            ctx.textPosition = CGPoint(x: x, y: r.midY + (font.ascender + font.descender) / 2)
+            CTLineDraw(line, ctx)
         }
     }
 

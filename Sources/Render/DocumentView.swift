@@ -34,6 +34,9 @@ public protocol DocumentContent: AnyObject {
     func anchorY(_ name: String) -> CGFloat?
     /// About to show `rect` (content space): finish any deferred layout it needs.
     func willShow(_ rect: CGRect)
+    /// Height of the viewport, before `layout(width:)`: how much content must be exact for
+    /// the first frame (markdown lays out the rest in the background).
+    func setViewportHeight(_ h: CGFloat)
 }
 
 extension DocumentContent {
@@ -43,6 +46,7 @@ extension DocumentContent {
     public func setPalette(_ p: Palette) -> Bool { false }
     public func anchorY(_ name: String) -> CGFloat? { nil }
     public func willShow(_ rect: CGRect) {}
+    public func setViewportHeight(_ h: CGFloat) {}
 }
 
 /// Selection and find state handed to the content's draw call.
@@ -137,6 +141,7 @@ public final class DocumentView: NSView {
         anchor = 0; head = 0
         palette = Palette.current(for: self)
         _ = c.setPalette(palette)
+        c.setViewportHeight(scrollView?.contentView.bounds.height ?? bounds.height)
         _ = c.layout(width: max(100, width - c.gutterWidth))
         resize()
         for t in tiles { t.removeFromSuperview() }
@@ -205,7 +210,10 @@ public final class DocumentView: NSView {
         let margin = ts / 2
         let want = vis.insetBy(dx: -margin, dy: -margin).intersection(bounds)
         if want.isNull || want.isEmpty { return }
-        c.willShow(want.offsetBy(dx: -c.gutterWidth, dy: 0))
+        // Only the visible rect forces exact layout. Margin tiles may draw from estimated
+        // markdown geometry; they are redrawn when background layout lands. (Passing `want`
+        // here made a tall viewport lay out a whole 900 KB document synchronously: 143 ms.)
+        c.willShow(vis.offsetBy(dx: -c.gutterWidth, dy: 0))
         let c0 = Int(want.minX / ts), c1 = Int((want.maxX - 0.5) / ts)
         let r0 = Int(want.minY / ts), r1 = Int((want.maxY - 0.5) / ts)
         let gw = c.gutterWidth

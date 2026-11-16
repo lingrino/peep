@@ -75,6 +75,24 @@ public final class CodeContent: DocumentContent {
     @inline(__always)
     func isSimple(_ s: Int, _ e: Int) -> Bool { UnsafePointer(text.base + s).isASCII(e - s) }
 
+    /// End of the shortest prefix of line [s, e) that surely reaches `columns`: every
+    /// character advances at least one column (tabs and wide glyphs more), so counting
+    /// characters bounds it. Zero-width combining marks can undercount; callers add margin.
+    func visiblePrefixEnd(_ s: Int, _ e: Int, columns: Int) -> Int {
+        if e - s <= columns { return e }   // bytes >= characters
+        let p = text.base
+        var n = 0
+        var i = s
+        while i < e {
+            if p[i] & 0xC0 != 0x80 {
+                if n == columns { return i }
+                n &+= 1
+            }
+            i &+= 1
+        }
+        return e
+    }
+
     /// x (content space) of byte `o` within line [s, e).
     func x(of o: Int, line s: Int, _ e: Int, shaped: Shaped?) -> CGFloat {
         if let sh = shaped {
@@ -181,13 +199,17 @@ public final class CodeContent: DocumentContent {
             if y + lh < rect.minY { continue }
             let s = lines.start(i), e = lines.end(i)
             let next = Int(lines.starts[i + 1])   // includes the newline
-            let simple = isSimple(s, e)
-            let shaped = simple ? nil : shape(s, e, palette: palette)
+            // Only the part of the line that can reach this tile's right edge is classified,
+            // shaped and drawn: an 8 KB minified line with one non-ASCII character was being
+            // shaped whole, once per tile (14 ms first paint).
+            let pe = visiblePrefixEnd(s, e, columns: Int((rect.maxX - padX) / adv) + 32)
+            let simple = isSimple(s, pe)
+            let shaped = simple ? nil : shape(s, pe, palette: palette)
 
             // Selection background.
             if h.selEnd > h.selStart && h.selStart < next && h.selEnd > s {
-                let x0 = h.selStart <= s ? padX : x(of: h.selStart, line: s, e, shaped: shaped)
-                let x1 = h.selEnd > e ? max(rect.maxX, x(of: e, line: s, e, shaped: shaped) + adv) : x(of: h.selEnd, line: s, e, shaped: shaped)
+                let x0 = h.selStart <= s ? padX : x(of: h.selStart, line: s, pe, shaped: shaped)
+                let x1 = h.selEnd > e ? max(rect.maxX, x(of: e, line: s, pe, shaped: shaped) + adv) : x(of: h.selEnd, line: s, pe, shaped: shaped)
                 ctx.setFillColor(palette.selection)
                 ctx.fill(CGRect(x: x0, y: y, width: max(1, x1 - x0), height: lh))
             }
@@ -197,8 +219,8 @@ public final class CodeContent: DocumentContent {
                 if ms >= next { break }
                 let a = max(ms, s), b = min(me, e)
                 if b > a || (ms < next && me > s) {
-                    let x0 = x(of: a, line: s, e, shaped: shaped)
-                    let x1 = b > a ? x(of: b, line: s, e, shaped: shaped) : x0 + adv / 2
+                    let x0 = x(of: a, line: s, pe, shaped: shaped)
+                    let x1 = b > a ? x(of: b, line: s, pe, shaped: shaped) : x0 + adv / 2
                     let r = CGRect(x: x0 - 1, y: y + 1, width: x1 - x0 + 2, height: lh - 2)
                     ctx.setFillColor(mi == h.current ? palette.findCurrent : palette.findMatch)
                     ctx.addPath(CGPath(roundedRect: r, cornerWidth: 3, cornerHeight: 3, transform: nil))
@@ -216,7 +238,7 @@ public final class CodeContent: DocumentContent {
                 // fast path below positions glyphs absolutely and must start from zero.
                 ctx.textPosition = .zero
             } else {
-                drawASCII(ctx, s, e, baseline: baseline, minX: rect.minX, maxX: rect.maxX, palette: palette)
+                drawASCII(ctx, s, pe, baseline: baseline, minX: rect.minX, maxX: rect.maxX, palette: palette)
             }
         }
     }
