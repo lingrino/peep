@@ -12,6 +12,16 @@ end
 class Shelf
   include Enumerable
 
+  GENRES = %w[fiction poetry history].freeze
+  TITLE_PATTERN = %r{\A[\w\s'-]+\z}
+
+  def self.banner(name)
+    <<~TEXT
+      Shelf: #{name}
+      Genres: #{GENRES.join(", ")}
+    TEXT
+  end
+
   def initialize = @books = []
 
   def <<(book)

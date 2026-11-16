@@ -26,5 +26,8 @@ public static class Program
         var shapes = new List<Shape> { new Circle(1.5), new Rect(2, 3) };
         foreach (var s in shapes.OrderBy(s => s.Area))
             Console.WriteLine($"{s.Name,-8} {s.Area:F2}");
+        Console.WriteLine($"""
+            {shapes.Count} shapes, "raw" text with C:\paths
+            """);
     }
 }

@@ -1,9 +1,15 @@
 #include <array>
 #include <iostream>
 
+constexpr std::size_t kMaxCells = 1'000'000;
+
 template <typename T, std::size_t N>
 class Matrix {
 public:
+    static_assert(N * N <= kMaxCells, "matrix too large");
+
+    [[nodiscard]] constexpr std::size_t size() const { return N * N; }
+
     constexpr T& operator()(std::size_t r, std::size_t c) { return data_[r * N + c]; }
     constexpr const T& operator()(std::size_t r, std::size_t c) const { return data_[r * N + c]; }
 

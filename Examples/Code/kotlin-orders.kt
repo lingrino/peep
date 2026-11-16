@@ -24,4 +24,12 @@ fun main() {
         is Result.Ok -> println("order #${r.order.id}: ${r.order.total}")
         is Result.Failed -> println(r.reason)
     }
+    println("""
+        |Receipt for ${service.javaClass.simpleName}
+        |Items: $stockSummary
+    """.trimMargin())
 }
+
+val stockSummary get() = "tea, cake"
+
+fun String.receiptLine(): String = "* $this"
