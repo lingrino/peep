@@ -67,6 +67,8 @@ public struct LoadedFile: Sendable {
     public let raw: TextBuffer
     /// File size on disk (may exceed `raw.count` when truncated).
     public let fileSize: Int
+    /// Bytes skipped at the start (tail loads of logs).
+    public var offset = 0
     public var truncated: Bool { fileSize > raw.count }
 }
 
@@ -75,18 +77,29 @@ public enum FileLoader {
     ///
     /// `read(2)` into our own buffer beats `mmap` here: we touch every byte anyway (decode +
     /// line index), we need the zeroed padding, and a page-cache memcpy runs at tens of GB/s.
-    public static func load(path: String, limit: Int) throws(LoadError) -> LoadedFile {
+    ///
+    /// `tail`: when the file is larger than `limit`, read its *end* instead (logs), starting
+    /// at the first line that begins within the last `limit` bytes.
+    public static func load(path: String, limit: Int, tail: Bool = false) throws(LoadError) -> LoadedFile {
         let fd = open(path, O_RDONLY | O_CLOEXEC)
         if fd < 0 { throw .open(errno) }
         defer { close(fd) }
         var st = stat()
         if fstat(fd, &st) != 0 { throw .open(errno) }
         let size = Int(st.st_size)
-        let want = min(size, limit)
+        var start = 0
+        if tail && size > limit {
+            start = size - limit
+            // Begin at a line start: probe a little and skip the partial first line.
+            var probe = [UInt8](repeating: 0, count: 64 << 10)
+            let n = probe.withUnsafeMutableBytes { pread(fd, $0.baseAddress, $0.count, off_t(start)) }
+            if n > 0, let nl = probe[0..<n].firstIndex(of: 0x0A) { start += nl + 1 }
+        }
+        let want = min(size - start, limit)
         let p = TextBuffer.allocate(want)
         var got = 0
         while got < want {
-            let n = read(fd, p + got, want - got)
+            let n = pread(fd, p + got, want - got, off_t(start + got))
             if n < 0 {
                 if errno == EINTR { continue }
                 p.deallocate()
@@ -96,6 +109,8 @@ public enum FileLoader {
             got += n
         }
         if got < want { (p + got).initialize(repeating: 0, count: TextBuffer.padding) }
-        return LoadedFile(raw: TextBuffer(owning: p, count: got), fileSize: size)
+        var f = LoadedFile(raw: TextBuffer(owning: p, count: got), fileSize: size)
+        f.offset = start
+        return f
     }
 }

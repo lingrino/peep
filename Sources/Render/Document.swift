@@ -17,6 +17,8 @@ public final class Document {
     public var path: String?
     /// Shown in a small pill at the bottom of the preview (e.g. "First 64 MB of 1.2 GB").
     public var notice: String?
+    /// Open scrolled to the end (logs: the newest lines are what you want).
+    public var startAtEnd = false
 
     init(kind: Kind, content: DocumentContent, fileSize: Int, truncated: Bool) {
         self.kind = kind
@@ -37,9 +39,10 @@ public final class Document {
             times.append((name, n - t))
             t = n
         }
+        let isLog = path.lowercased().hasSuffix(".log")
         let file: LoadedFile
         do {
-            file = try FileLoader.load(path: path, limit: maxBytes)
+            file = try FileLoader.load(path: path, limit: maxBytes, tail: isLog)
         } catch {
             return message("Couldn't read this file.", fileSize: 0)
         }
@@ -68,7 +71,7 @@ public final class Document {
         if lang == .hexdump && file.fileSize > HexDump.limit {
             notice = "First \(byteCount(HexDump.limit)) of \(byteCount(file.fileSize))"
         } else if file.truncated {
-            notice = "First \(byteCount(file.raw.count)) of \(byteCount(file.fileSize))"
+            notice = "\(file.offset > 0 ? "Last" : "First") \(byteCount(file.raw.count)) of \(byteCount(file.fileSize))"
         }
         if lang == .markdown {
             let md = MarkdownParser.parse(text)
@@ -90,12 +93,13 @@ public final class Document {
         lang.lex(text.base, 0, prefixEnd, tokens)
         mark("lex")
         let content = CodeContent(text: text, lines: lines, tokens: tokens, language: lang, typography: typography,
-                                  lineNumbers: lang != .hexdump)
+                                  lineNumbers: lang != .hexdump && file.offset == 0)   // tail loads: numbers would be wrong
         mark("content")
         let doc = Document(kind: .code(lang), content: content, fileSize: file.fileSize, truncated: file.truncated)
         doc.timings = times
         doc.path = path
         doc.notice = notice
+        doc.startAtEnd = isLog
         if prefixEnd < text.count {
             let text = text, lang = lang
             DispatchQueue.global(qos: .userInitiated).async {

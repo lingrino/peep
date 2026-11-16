@@ -66,7 +66,9 @@ public final class PreviewView: NSView {
         if let n = notice {
             let s = n.fittingSize
             let area = scrollView.frame
-            n.frame = NSRect(x: area.midX - s.width / 2, y: area.maxY - s.height - 14, width: s.width, height: s.height)
+            // At the top for documents opened at their end (logs), so it never covers the last line.
+            let y = document?.startAtEnd == true ? area.minY + 14 : area.maxY - s.height - 14
+            n.frame = NSRect(x: area.midX - s.width / 2, y: y, width: s.width, height: s.height)
         }
     }
 
@@ -137,6 +139,8 @@ public final class PreviewView: NSView {
         layoutSubtreeIfNeeded()
         lastWidth = scrollView.contentView.bounds.width
         documentView.setContent(doc.content, width: lastWidth)
+        // Before the first draw, so only the tiles at the end are ever rendered.
+        if doc.startAtEnd { documentView.scrollToTop(y: .greatestFiniteMagnitude) }
     }
 
     // MARK: - Early clicks
