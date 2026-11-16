@@ -1,0 +1,22 @@
+/* Base styles */
+:root {
+  --accent: #3b82f6;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { --accent: #60a5fa; }
+}
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, sans-serif;
+}
+
+.card:hover > h2::after {
+  content: "→";
+  color: var(--accent);
+  transition: transform 0.2s ease-in-out;
+}
+
+#main[data-state="open"] { border-radius: calc(var(--radius) * 2); }

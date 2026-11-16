@@ -1,0 +1,14 @@
+# Build output
+/build/
+/dist/
+*.o
+*.dSYM/
+
+# Dependencies
+node_modules/
+.venv/
+
+# Editors and OS
+.DS_Store
+*.swp
+!keep-this.swp

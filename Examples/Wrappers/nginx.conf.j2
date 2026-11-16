@@ -1,0 +1,10 @@
+server {
+    listen {{ port | default(80) }};
+    server_name {{ domain }};
+
+    {% for upstream in upstreams %}
+    location /{{ upstream.name }}/ {
+        proxy_pass http://{{ upstream.host }}:{{ upstream.port }};
+    }
+    {% endfor %}
+}

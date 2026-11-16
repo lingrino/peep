@@ -1,0 +1,19 @@
+# Blog schema.
+type Post {
+  id: ID!
+  title: String!
+  body: String
+  author: User!
+  tags: [String!]!
+}
+
+type User {
+  id: ID!
+  name: String!
+  posts(first: Int = 10): [Post!]!
+}
+
+type Query {
+  post(id: ID!): Post
+  search(term: String!): [Post!]!
+}

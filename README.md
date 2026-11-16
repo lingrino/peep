@@ -31,4 +31,6 @@ Scripts/build.sh install      # build, sign, install to /Applications
 Then open Peep.app once and grant Accessibility access when asked (Quick Look previews can't
 receive keystrokes; Peep's small background agent forwards ⌘F and friends).
 
+[Examples](Examples) has a sample of every supported file type to try it on.
+
 Architecture and development notes for contributors (human or AI) are in [AGENTS.md](AGENTS.md).

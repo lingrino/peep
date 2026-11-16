@@ -1,0 +1,11 @@
+[Unit]
+Description=Example web service
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/example --port 8080
+Restart=on-failure
+Environment=LOG_LEVEL=info
+
+[Install]
+WantedBy=multi-user.target

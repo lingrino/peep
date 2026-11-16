@@ -1,0 +1,4 @@
+{"ts":"2026-03-01T10:00:00Z","level":"info","msg":"server started","port":8080}
+{"ts":"2026-03-01T10:00:02Z","level":"debug","msg":"cache warm","entries":1240}
+{"ts":"2026-03-01T10:01:13Z","level":"warn","msg":"slow request","path":"/search","ms":812}
+{"ts":"2026-03-01T10:02:40Z","level":"error","msg":"upstream timeout","retry":true}

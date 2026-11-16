@@ -1,0 +1,16 @@
+// Theme with variables, nesting and mixins
+$accent: #e11d48;
+$spacing: (sm: 4px, md: 8px, lg: 16px);
+
+@mixin focus-ring($color: $accent) {
+  outline: 2px solid rgba($color, 0.6);
+  outline-offset: 2px;
+}
+
+.button {
+  padding: map-get($spacing, md) map-get($spacing, lg);
+  background: $accent;
+
+  &:focus-visible { @include focus-ring; }
+  &--ghost { background: transparent; color: darken($accent, 10%); }
+}

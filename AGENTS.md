@@ -59,6 +59,7 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 | `Sources/App/` | Host app, agent |
 | `Dev/` | `peep-dev` tool: `render`, `bench`, `lexbench`, `parsebench`, `mddump`, `mdbench`, `firstpaint`, `findbench`, `smoke`, `tokens`, `layout`, `types`, `icon` |
 | `Tests/` | Zero-dependency test harness + tests (text, search, lexers, markdown) |
+| `Examples/` | A sample of every supported type for looking at by hand (see its README); binaries come from `Scripts/make-examples.sh` |
 | `Bundle/` | Info.plists, entitlements |
 | `Scripts/` | build/test/dev/profile/signing/type generation |
 
@@ -83,6 +84,7 @@ Scripts/dev.sh symbols <files...>          # code outline entries as the sidebar
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
+Scripts/make-examples.sh [--large]  # regenerate Examples/ binaries (deterministic); --large: huge files in Examples/Large (ignored)
 Scripts/setup-signing.sh     # one-time per machine: local code-signing identity
 ```
 
@@ -268,7 +270,7 @@ as a fix with a test), and stay clean under `-sanitize=address`.
    file names), and dispatch in `lex`.
 2. C-like syntax: add a `CLikeSpec` in `Specs.swift` (keyword groups: K/D/T/C/B/Y). Otherwise a
    lexer in `Formats.swift`.
-3. Add a test in `Tests/LexTests.swift`; run `Scripts/gen-types.sh`; rebuild.
+3. Add a test in `Tests/LexTests.swift` and a sample in `Examples/Code/`; run `Scripts/gen-types.sh`; rebuild.
 
 ## Conventions
 

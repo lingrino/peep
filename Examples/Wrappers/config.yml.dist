@@ -1,0 +1,7 @@
+# Copy to config.yml and fill in.
+server:
+  port: 8080
+  base_url: https://example.test
+storage:
+  driver: s3
+  bucket: change-me

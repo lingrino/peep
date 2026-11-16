@@ -1,0 +1,20 @@
+diff --git a/src/client.ts b/src/client.ts
+index 3f2a1b0..8c4d9e2 100644
+--- a/src/client.ts
++++ b/src/client.ts
+@@ -12,9 +12,11 @@ export class Client {
+   constructor(private base: string) {}
+
+   async get(path: string): Promise<Response> {
+-    return fetch(this.base + path);
++    const controller = new AbortController();
++    const timer = setTimeout(() => controller.abort(), 5_000);
++    try {
++      return await fetch(this.base + path, { signal: controller.signal });
++    } finally {
++      clearTimeout(timer);
++    }
+   }
+-
+-  // TODO: timeouts
+ }

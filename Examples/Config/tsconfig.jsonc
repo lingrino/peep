@@ -1,0 +1,13 @@
+{
+  // Shared compiler options. JSONC allows comments and trailing commas.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,              /* the whole strict family */
+    "noUncheckedIndexedAccess": true,
+    "jsx": "react-jsx",
+    "paths": { "@/*": ["./src/*"] },
+  },
+  "include": ["src", "tests"],
+}

@@ -1,0 +1,13 @@
+// Less variables and guards
+@base: #10b981;
+@gutter: 12px;
+
+.bordered(@width: 1px) {
+  border: @width solid darken(@base, 15%);
+}
+
+.panel {
+  .bordered(2px);
+  padding: @gutter;
+  & when (iscolor(@base)) { color: @base; }
+}
