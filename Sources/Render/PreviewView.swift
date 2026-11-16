@@ -8,6 +8,7 @@ public final class PreviewView: NSView {
     public private(set) var document: Document?
     private var lastWidth: CGFloat = 0
     private var outline: OutlineView?
+    private var notice: NoticeView?
     /// Links that leave the document (http, mailto, other files). In-document anchors are
     /// handled here.
     public var onExternalLink: ((String) -> Void)?
@@ -61,6 +62,11 @@ public final class PreviewView: NSView {
         }
         scrollView.frame = showOutline ? NSRect(x: OutlineView.width, y: 0, width: bounds.width - OutlineView.width, height: bounds.height) : bounds
         if isFinding { positionFindBar() }
+        if let n = notice {
+            let s = n.fittingSize
+            let area = scrollView.frame
+            n.frame = NSRect(x: area.midX - s.width / 2, y: area.maxY - s.height - 14, width: s.width, height: s.height)
+        }
     }
 
     private func updateOutlineCurrent() {
@@ -114,6 +120,14 @@ public final class PreviewView: NSView {
                 addSubview(o, positioned: .below, relativeTo: scrollView)
                 outline = o
             }
+            needsLayout = true
+        }
+        notice?.removeFromSuperview()
+        notice = nil
+        if let text = doc.notice {
+            let n = NoticeView(text)
+            addSubview(n)
+            notice = n
             needsLayout = true
         }
         documentView.onSelectionChange = { [weak self] in self?.onStateChange?() }
@@ -283,4 +297,39 @@ public final class PreviewView: NSView {
 
 extension CGColor {
     func withNSColor(_ body: (NSColor) -> Void) { if let c = NSColor(cgColor: self) { body(c) } }
+}
+
+/// Small pill at the bottom of the preview ("First 64 MB of 1.2 GB"). Only created when a
+/// document has a notice, so ordinary previews pay nothing. Self-drawn: a visual-effect view
+/// would not render in `peep-dev render` bitmaps, and one string needs no text field.
+final class NoticeView: NSView {
+    private let text: NSAttributedString
+
+    init(_ s: String) {
+        text = NSAttributedString(string: s, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    override var fittingSize: NSSize { NSSize(width: ceil(text.size().width) + 24, height: 22) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2)
+        NSColor.windowBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        let h = text.size().height
+        text.draw(at: NSPoint(x: 12, y: (bounds.height - h) / 2))
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }   // never blocks selection/scrolling
 }

@@ -15,6 +15,8 @@ public final class Document {
     public let truncated: Bool
     public var timings: [(String, UInt64)] = []
     public var path: String?
+    /// Shown in a small pill at the bottom of the preview (e.g. "First 64 MB of 1.2 GB").
+    public var notice: String?
 
     init(kind: Kind, content: DocumentContent, fileSize: Int, truncated: Bool) {
         self.kind = kind
@@ -62,6 +64,12 @@ public final class Document {
             }
         }
         mark("detect")
+        var notice: String?
+        if lang == .hexdump && file.fileSize > HexDump.limit {
+            notice = "First \(byteCount(HexDump.limit)) of \(byteCount(file.fileSize))"
+        } else if file.truncated {
+            notice = "First \(byteCount(file.raw.count)) of \(byteCount(file.fileSize))"
+        }
         if lang == .markdown {
             let md = MarkdownParser.parse(text)
             mark("parse")
@@ -69,6 +77,7 @@ public final class Document {
             let doc = Document(kind: .markdown, content: content, fileSize: file.fileSize, truncated: file.truncated)
             doc.timings = times
             doc.path = path
+            doc.notice = notice
             return doc
         }
         let lines = LineIndex(text)
@@ -86,6 +95,7 @@ public final class Document {
         let doc = Document(kind: .code(lang), content: content, fileSize: file.fileSize, truncated: file.truncated)
         doc.timings = times
         doc.path = path
+        doc.notice = notice
         if prefixEnd < text.count {
             let text = text, lang = lang
             DispatchQueue.global(qos: .userInitiated).async {
@@ -124,7 +134,7 @@ public final class Document {
     }
 
     static func byteCount(_ n: Int) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)
+        ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .memory)   // binary units: limits read as 64 KB / 64 MB
     }
 
     public var timingSummary: String {
