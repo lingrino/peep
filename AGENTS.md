@@ -45,8 +45,14 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
    And it shows the copy-path button after the panel's title (`TitleButton`): the title bar is
    Quick Look's, so the button is a tiny non-activating window of the agent's (activation policy
    `.accessory`), placed from the title text's Accessibility frame (`AXStaticText` in the
-   panel's title bar), hidden while the panel is dragged or resized, re-placed on preview state
-   messages (which carry the file path), mouse-up and a 0.5 s poll. The computer-use screenshot
+   panel's title bar; hidden when a narrow panel leaves no room before its controls, or while
+   the panel is dragged or resized). It shows for any previewer's file in Finder's panel and
+   for Peep previews anywhere. The path: a Peep preview's state message, else Finder's
+   selected item named like the panel's title, looked up on click (Accessibility gives Finder
+   items a file reference `AXURL`; the panel itself exposes no path; in list view Finder's
+   focus is the panel, so its main window is searched). Re-placed once input pauses after
+   state messages, keys and clicks in Finder (AX calls are served on Finder's main thread:
+   not per key repeat), mouse-up, and a 0.5 s poll. The computer-use screenshot
    tool doesn't show the agent's windows (a launchd process, not the app): verify with
    `CGWindowListCopyWindowInfo` and by clicking it (`pbpaste`).
 3. **Peep.app** — `Sources/App/HostApp.swift`. Opening it shows setup status (extension,

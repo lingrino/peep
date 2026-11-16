@@ -58,10 +58,22 @@ final class AgentCore {
     private var previews: [Preview] = []
     private var tap: CFMachPort?
     private var panelCache: (pid: pid_t, at: UInt64, rect: CGRect?) = (0, 0, nil)
+    /// Finder is the frontmost app: its Quick Look panel gets the copy-path button whatever
+    /// previewer shows the file (the path then comes from Finder's selection).
+    private(set) var finderFront = false
 
     func start() {
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         Agent.log.notice("agent start trusted=\(AXIsProcessTrustedWithOptions(opts))")
+        finderFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder"
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
+                                                          object: nil, queue: .main) { n in
+            let finder = (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier == "com.apple.finder"
+            MainActor.assumeIsolated {
+                AgentCore.shared.finderFront = finder
+                AgentCore.shared.titleButton.soon()
+            }
+        }
         startListener()
         installTapWhenTrusted()
     }
@@ -187,10 +199,15 @@ final class AgentCore {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
-        if previews.isEmpty { return Unmanaged.passUnretained(event) }
-        if type == .leftMouseUp { titleButton.mouseUp(); return Unmanaged.passUnretained(event) }
+        if titleButton.active {
+            if type == .leftMouseDown { titleButton.mouseDown(at: event.location) }
+            if type == .leftMouseUp { titleButton.mouseUp() }
+        }
+        // In Finder a key or click may open, close or move the Quick Look panel to another
+        // file, whatever previewer shows it (Peep's previews also report their state).
+        if finderFront && (type == .keyDown || type == .leftMouseUp) { titleButton.soon() }
+        if previews.isEmpty || type == .leftMouseUp { return Unmanaged.passUnretained(event) }
         if type == .leftMouseDown {
-            titleButton.mouseDown(at: event.location)
             if event.getIntegerValueField(.mouseEventClickState) == 1 { forwardClick(event) }
             return Unmanaged.passUnretained(event)   // never consumed: Quick Look still delivers it (late)
         }
@@ -226,13 +243,13 @@ final class AgentCore {
 
     let titleButton = TitleButton()
 
-    /// The panel and Peep preview the title button belongs to (fresh, not cached).
-    func panelAndPreview() -> (pid: pid_t, panel: CGRect, preview: Preview)? {
+    /// The frontmost app's Quick Look panel and the Peep preview in it, if it is one (fresh,
+    /// not cached).
+    func frontPanel() -> (pid: pid_t, panel: CGRect, preview: Preview?)? {
         guard let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
               let panel = quickLookPanel(of: front) else { return nil }
         panelCache = (front, nanotime(), panel)
-        guard let p = target() else { return nil }
-        return (front, panel, p)
+        return (front, panel, target())
     }
 
     /// The visible Peep preview shown in the frontmost app's Quick Look panel, if any.
@@ -314,11 +331,32 @@ final class TitleButton {
     private var timer: Timer?
     private var dragging = false
     private var lastPanel = CGRect.null
+    private var scheduled = false
+    private var lastPoke: UInt64 = 0
 
-    /// Re-place a few times while the panel settles (it zooms open), then keep polling slowly.
+    /// Shown, or hidden for a drag that will bring it back: mouse events matter.
+    var active: Bool { dragging || panel?.isVisible == true }
+
+    /// Something changed (a preview's state, a key or click in Finder): re-place once input
+    /// pauses, then twice more while the panel's zoom or resize settles. Placing asks Finder
+    /// (Accessibility, served on its main thread) for the title's frame; per key repeat while
+    /// stepping through files that would compete with Finder's own work.
     func soon() {
+        lastPoke = nanotime()
+        guard !scheduled else { return }
+        scheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { self.settle() } }
+    }
+
+    private func settle() {
+        let quiet = nanotime() - lastPoke
+        if quiet < 90_000_000 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .nanoseconds(Int(100_000_000 - quiet))) { MainActor.assumeIsolated { self.settle() } }
+            return
+        }
+        scheduled = false
         update()
-        for delay in [0.12, 0.3, 0.55] {
+        for delay in [0.2, 0.45] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { self.update() } }
         }
     }
@@ -340,25 +378,36 @@ final class TitleButton {
 
     func update() {
         guard !dragging else { return }
-        guard let (pid, panelRect, preview) = AgentCore.shared.panelAndPreview(), !preview.path.isEmpty else {
-            Agent.log.debug("title button: no Peep preview in the frontmost app's panel")
+        guard let (pid, panelRect, preview) = AgentCore.shared.frontPanel() else { hide(); return }
+        // A Peep preview reports its file; any other previewer's file is Finder's selection.
+        let path = preview?.path ?? ""
+        guard !path.isEmpty || AgentCore.shared.finderFront else {
+            Agent.log.debug("title button: no path for the frontmost app's panel")
             hide(); return
         }
-        guard let title = TitleButton.titleFrame(pid: pid, panel: panelRect) else {
+        guard let title = TitleButton.title(pid: pid, panel: panelRect) else {
             Agent.log.debug("title button: no title element in panel \(String(describing: panelRect), privacy: .public)")
             hide(); return
         }
-        lastPanel = panelRect
         let size: CGFloat = 20
+        // A narrow panel (a small image) truncates its title against its controls: no room.
+        guard title.room >= size + 8 else { hide(); return }
+        lastPanel = panelRect
         // After the title, vertically centered on it (AX and CG: top-left origin; AppKit: bottom-left).
-        let x = title.maxX + 4, yTop = title.midY - size / 2
+        let x = title.frame.maxX + 4, yTop = title.frame.midY - size / 2
         let frame = NSRect(x: x, y: TitleButton.flip(yTop + size), width: size, height: size)
         let w = panel ?? makePanel()
-        view?.path = preview.path
+        let name = title.text
+        view?.resolve = path.isEmpty ? { TitleButton.finderSelection(pid: pid, named: name) } : { path }
         if w.frame != frame { w.setFrame(frame, display: false) }
         if !w.isVisible { w.orderFrontRegardless() }
         if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in MainActor.assumeIsolated { self.update() } }
+            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+                MainActor.assumeIsolated {
+                    // Not while input is still arriving (soon() places once it pauses).
+                    if nanotime() - self.lastPoke > 300_000_000 && !self.scheduled { self.update() }
+                }
+            }
         }
     }
 
@@ -387,28 +436,93 @@ final class TitleButton {
     /// Top-left-origin y (AX, CG) to AppKit's bottom-left origin on the main screen.
     static func flip(_ y: CGFloat) -> CGFloat { (NSScreen.screens.first?.frame.height ?? 0) - y }
 
-    /// The title text's frame in the Quick Look panel matching `panel` (top-left origin).
-    static func titleFrame(pid: pid_t, panel: CGRect) -> CGRect? {
+    /// The title text in the Quick Look panel matching `panel`: its frame (top-left origin),
+    /// string (the file's name) and the free space after it, up to the first title bar control.
+    static func title(pid: pid_t, panel: CGRect) -> (frame: CGRect, text: String, room: CGFloat)? {
         let app = AXUIElementCreateApplication(pid)
         guard let windows: [AXUIElement] = value(app, kAXWindowsAttribute) else { return nil }
         for w in windows {
             guard let f = frame(w), abs(f.minX - panel.minX) < 2, abs(f.minY - panel.minY) < 2,
                   abs(f.width - panel.width) < 2 else { continue }
-            return findTitle(w, below: f.minY + 34, depth: 0)
+            guard let t = findTitle(w, below: f.minY + 34, depth: 0) else { return nil }
+            let controls = firstControl(w, after: t.frame.maxX - 1, below: f.minY + 34, depth: 0) ?? f.maxX
+            return (t.frame, t.text, controls - t.frame.maxX)
         }
         return nil
     }
 
-    private static func findTitle(_ e: AXUIElement, below maxY: CGFloat, depth: Int) -> CGRect? {
+    /// Left edge of the leftmost title bar button right of `x` (share, open, rotate...).
+    private static func firstControl(_ e: AXUIElement, after x: CGFloat, below maxY: CGFloat, depth: Int) -> CGFloat? {
+        guard depth < 4, let children: [AXUIElement] = value(e, kAXChildrenAttribute) else { return nil }
+        var best: CGFloat?
+        for c in children {
+            guard let f = frame(c), f.minY < maxY else { continue }
+            if let role: String = value(c, kAXRoleAttribute), role == kAXButtonRole as String || role == kAXMenuButtonRole as String {
+                if f.minX > x { best = min(best ?? .infinity, f.minX) }
+            } else if let m = firstControl(c, after: x, below: maxY, depth: depth + 1) {
+                best = min(best ?? .infinity, m)
+            }
+        }
+        return best
+    }
+
+    private static func findTitle(_ e: AXUIElement, below maxY: CGFloat, depth: Int) -> (frame: CGRect, text: String)? {
         guard depth < 4, let children: [AXUIElement] = value(e, kAXChildrenAttribute) else { return nil }
         for c in children {
             if let role: String = value(c, kAXRoleAttribute), role == kAXStaticTextRole as String,
-               let f = frame(c), f.minY < maxY, f.width > 0 { return f }
+               let f = frame(c), f.minY < maxY, f.width > 0 { return (f, value(c, kAXValueAttribute) ?? "") }
         }
         for c in children {
             if let f = frame(c), f.minY > maxY { continue }   // the title is in the title bar
             if let t = findTitle(c, below: maxY, depth: depth + 1) { return t }
         }
+        return nil
+    }
+
+    /// The path of the file Finder's Quick Look panel shows when another previewer shows it:
+    /// the selected Finder item (Accessibility gives each a file reference URL) named like the
+    /// panel's title. Asked only when the button is clicked.
+    static func finderSelection(pid: pid_t, named name: String) -> String? {
+        let app = AXUIElementCreateApplication(pid)
+        var paths: [String] = []
+        // Column view: the focused element is the active column's list. List view: the focus
+        // is the Quick Look panel itself; search the browser window (the sidebar has a
+        // selection too, hence the name match).
+        if let f: AXUIElement = value(app, kAXFocusedUIElementAttribute) { selectedFiles(f, &paths, depth: 2) }
+        if let p = pick(paths, name) { return p }
+        let windows: [AXUIElement] = value(app, kAXWindowsAttribute) ?? []
+        let main: AXUIElement? = value(app, kAXMainWindowAttribute)
+            ?? windows.first { (value($0, kAXSubroleAttribute) as String?) == kAXStandardWindowSubrole as String }
+        if let main { selectedFiles(main, &paths, depth: 10) }
+        if let p = pick(paths, name) { return p }
+        Agent.log.debug("title button: \(paths.count) selected files in Finder, none named like the panel's title")
+        return nil
+    }
+
+    private static func pick(_ paths: [String], _ name: String) -> String? {
+        if name.isEmpty { return paths.count == 1 ? paths[0] : nil }
+        return paths.first {
+            let last = ($0 as NSString).lastPathComponent
+            return last == name || (last as NSString).deletingPathExtension == name   // extension hidden
+        }
+    }
+
+    /// Paths of the selected items of every list, outline or browser under `e`.
+    private static func selectedFiles(_ e: AXUIElement, _ out: inout [String], depth: Int) {
+        var selected: [AXUIElement] = value(e, kAXSelectedChildrenAttribute) ?? []
+        if selected.isEmpty { selected = value(e, kAXSelectedRowsAttribute) ?? [] }
+        for item in selected.prefix(200) {
+            if let p = fileURL(in: item, depth: 0)?.path, !out.contains(p) { out.append(p) }
+        }
+        guard selected.isEmpty, depth > 0, let children: [AXUIElement] = value(e, kAXChildrenAttribute) else { return }
+        for c in children { selectedFiles(c, &out, depth: depth - 1) }
+    }
+
+    /// The first file URL on an element or its descendants (Finder puts it on the name field).
+    private static func fileURL(in e: AXUIElement, depth: Int) -> URL? {
+        if let u: URL = value(e, kAXURLAttribute), u.isFileURL { return (u as NSURL).filePathURL ?? u }
+        guard depth < 3, let children: [AXUIElement] = value(e, kAXChildrenAttribute) else { return nil }
+        for c in children { if let u = fileURL(in: c, depth: depth + 1) { return u } }
         return nil
     }
 
@@ -428,7 +542,8 @@ final class TitleButton {
 
 /// The button: a copy icon (a checkmark for a moment after copying), highlighted on hover.
 final class CopyPathView: NSView {
-    var path = ""
+    /// The path to copy, looked up when clicked (nil: unknown, nothing copied).
+    var resolve: () -> String? = { nil }
     private var hover = false
     private var copiedUntil: TimeInterval = 0
 
@@ -446,7 +561,8 @@ final class CopyPathView: NSView {
     override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
 
     override func mouseDown(with event: NSEvent) {
-        Agent.log.debug("title button: click (path \(self.path.isEmpty ? "empty" : "set", privacy: .public))")
+        let path = resolve() ?? ""
+        Agent.log.debug("title button: click (path \(path.isEmpty ? "unknown" : "found", privacy: .public))")
         guard !path.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(path, forType: .string)
