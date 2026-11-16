@@ -49,11 +49,14 @@ public final class PreviewView: NSView {
     public override func layout() {
         super.layout()
         scrollView.frame = bounds
+        if isFinding { positionFindBar() }
     }
 
     public func show(_ doc: Document) {
         document = doc
         doc.onUpdate = { [weak self] in self?.documentView.invalidateAll() }
+        documentView.onSelectionChange = { [weak self] in self?.onStateChange?() }
+        if isFinding { closeFind() }
         layoutSubtreeIfNeeded()
         lastWidth = scrollView.contentView.bounds.width
         documentView.setContent(doc.content, width: lastWidth)
@@ -63,6 +66,72 @@ public final class PreviewView: NSView {
 
     private var matches: MatchList?
     public private(set) var currentMatch = -1
+    public private(set) lazy var findBar: FindBar = {
+        let b = FindBar(frame: NSRect(x: 0, y: 0, width: 360, height: 32))
+        b.isHidden = true
+        b.onChange = { [weak self] in self?.runFind() }
+        b.onNext = { [weak self] in self?.findNext(true) }
+        b.onPrev = { [weak self] in self?.findNext(false) }
+        b.onClose = { [weak self] in self?.closeFind() }
+        b.onActivate = { [weak self] in self?.openFind(prefill: false) }
+        addSubview(b)
+        return b
+    }()
+
+    /// True while the find bar is open and should receive typing.
+    public private(set) var isFinding = false
+    public var hasMatches: Bool { (matches?.count ?? 0) > 0 }
+
+    /// Find/selection state changed (the extension reports it to the keyboard agent).
+    public var onStateChange: (() -> Void)?
+
+    public func openFind(prefill: Bool = true) {
+        let bar = findBar
+        if !isFinding {
+            isFinding = true
+            bar.isHidden = false
+            positionFindBar()
+            if prefill, documentView.hasSelection, let doc = document {
+                let (s, e) = documentView.selectedRange
+                if e - s < 200 {
+                    let t = doc.content.copyText(s, e)
+                    if !t.contains("\n") { bar.setQuery(t, selectAll: true) }
+                }
+            }
+        }
+        bar.selectAllText()
+        bar.startEditing()
+        if !bar.query.isEmpty { runFind() }
+        onStateChange?()
+    }
+
+    public func closeFind() {
+        guard isFinding else { return }
+        isFinding = false
+        findBar.stopEditing()
+        findBar.isHidden = true
+        // Leave the current match selected (so ⌘C copies it), drop the highlights.
+        if let m = matches, currentMatch >= 0 { documentView.select(m.start(currentMatch), m.end(currentMatch)) }
+        clearFind()
+        onStateChange?()
+    }
+
+    private func positionFindBar() {
+        let w = min(380, max(240, bounds.width - 24))
+        findBar.frame = NSRect(x: bounds.width - w - 12, y: 10, width: w, height: 32)
+    }
+
+    private func runFind() {
+        let q = findBar.queryString
+        if q.isEmpty {
+            clearFind()
+            findBar.setStatus("", failed: false)
+        } else {
+            let n = find(q)
+            findBar.setStatus(n == 0 ? "No matches" : "\(currentMatch + 1) of \(n)", failed: n == 0)
+        }
+        onStateChange?()
+    }
 
     /// Runs a search and highlights all matches; reveals the first match at/after the
     /// selection start. Returns the match count.
@@ -83,12 +152,61 @@ public final class PreviewView: NSView {
         currentMatch = forward ? (currentMatch + 1) % m.count : (currentMatch - 1 + m.count) % m.count
         documentView.setMatches(m.buffer, current: currentMatch)
         documentView.reveal(m.start(currentMatch), m.end(currentMatch))
+        if isFinding { findBar.setStatus("\(currentMatch + 1) of \(m.count)", failed: false) }
     }
 
     public func clearFind() {
         matches = nil
         currentMatch = -1
         documentView.setMatches(UnsafeBufferPointer(start: nil, count: 0), current: -1)
+    }
+
+    // MARK: - Keys (forwarded by the agent)
+
+    /// Handles a key event forwarded from the keyboard agent. `mods` are CGEventFlags bits.
+    public func handleKey(code: UInt16, chars: String, mods: UInt64) {
+        let cmd = mods & 0x100000 != 0, shift = mods & 0x20000 != 0, opt = mods & 0x80000 != 0
+        if cmd {
+            switch code {
+            case 3: openFind()                                                  // ⌘F
+            case 5: findNext(!shift)                                            // ⌘G / ⇧⌘G
+            case 0: if isFinding { findBar.selectAllText() } else { documentView.selectAll() }
+            case 8:                                                             // ⌘C
+                if isFinding, let t = findBar.selectedText { copyString(t) } else { documentView.copy(nil) }
+            case 7:                                                             // ⌘X
+                if isFinding, let t = findBar.selectedText { copyString(t); findBar.deleteBackward(word: false, line: false) }
+            case 9:                                                             // ⌘V
+                if isFinding, let s = NSPasteboard.general.string(forType: .string) {
+                    findBar.insert(s.replacingOccurrences(of: "\n", with: " "))
+                }
+            case 51: findBar.deleteBackward(word: false, line: true)            // ⌘⌫
+            case 123: findBar.moveCaret(-1, toEnd: true)                        // ⌘←
+            case 124: findBar.moveCaret(1, toEnd: true)                         // ⌘→
+            default: break
+            }
+            onStateChange?()
+            return
+        }
+        guard isFinding else { return }
+        switch code {
+        case 53: closeFind()                                                    // esc
+        case 36, 76: findNext(!shift)                                           // return
+        case 51: findBar.deleteBackward(word: opt, line: false)                 // ⌫
+        case 117: findBar.deleteForward()                                       // ⌦
+        case 123: findBar.moveCaret(-1, word: opt)                              // ←
+        case 124: findBar.moveCaret(1, word: opt)                               // →
+        case 125: findNext(true)                                                // ↓
+        case 126: findNext(false)                                               // ↑
+        case 48: break                                                          // tab
+        default:
+            let printable = chars.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F && !(0xF700...0xF8FF).contains($0.value) }
+            if !printable.isEmpty { findBar.insert(String(String.UnicodeScalarView(printable))) }
+        }
+    }
+
+    private func copyString(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
     }
 
     public override func viewDidChangeEffectiveAppearance() {

@@ -6,5 +6,18 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
+	<!-- The keyboard agent's XPC service (Sources/App/Agent.swift). -->
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>com.lingrino.peep.agent</string>
+	</array>
+	<!-- Markdown: images next to the document (read-only). -->
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/</string>
+	</array>
+	<!-- Markdown: remote images. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
 </dict>
 </plist>

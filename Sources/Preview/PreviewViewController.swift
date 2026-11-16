@@ -9,10 +9,44 @@ let log = Logger(subsystem: "com.lingrino.peep", category: "preview")
 @objc(PeepPreviewController)
 final class PreviewViewController: NSViewController, @preconcurrency QLPreviewingController {
     private var preview: PreviewView!
+    private var agentID: UInt64 = 0
+    private var visible = false
+    private var reportedSize = CGSize.zero
 
     override func loadView() {
         preview = PreviewView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         view = preview
+        agentID = AgentClient.shared.register { [weak self] code, chars, mods in
+            self?.preview.handleKey(code: code, chars: chars, mods: mods)
+        }
+        preview.onStateChange = { [weak self] in self?.report() }
+        preview.documentView.onLink = { url in AgentClient.shared.open(url) }
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        visible = true
+        report()
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        visible = false
+        report()
+        AgentClient.shared.unregister(agentID)
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        if visible && view.bounds.size != reportedSize { report() }
+    }
+
+    /// Tells the keyboard agent what this preview needs (see Agent.shouldIntercept).
+    private func report() {
+        reportedSize = view.bounds.size
+        AgentClient.shared.sendState(id: agentID, size: reportedSize, visible: visible,
+                                     find: preview.isFinding, selection: preview.documentView.hasSelection,
+                                     matches: preview.hasMatches)
     }
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {

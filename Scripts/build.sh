@@ -45,12 +45,11 @@ wait $P1; wait $P2
 APP="$ROOT/.build/Peep.app"
 APPEX="$APP/Contents/PlugIns/PeepPreview.appex"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Library/LaunchAgents" "$APPEX/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APPEX/Contents/MacOS"
 cp "$OUT/Peep" "$APP/Contents/MacOS/Peep"
 cp "$OUT/PeepPreview" "$APPEX/Contents/MacOS/PeepPreview"
 cp Bundle/Peep-Info.plist "$APP/Contents/Info.plist"
 cp Bundle/PeepPreview-Info.plist "$APPEX/Contents/Info.plist"
-cp Bundle/com.lingrino.peep.agent.plist "$APP/Contents/Library/LaunchAgents/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 [[ -f Bundle/AppIcon.icns ]] && cp Bundle/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
@@ -75,9 +74,10 @@ echo "built $APP"
 
 if [[ "${1:-}" == install ]]; then
   DEST=/Applications/Peep.app
-  pluginkit -r "$DEST/Contents/PlugIns/PeepPreview.appex" 2>/dev/null || true
-  rm -rf "$DEST"
-  cp -R "$APP" "$DEST"
+  # Update in place (never delete the bundle): Background Task Management drops its record
+  # of the keyboard agent when the app bundle disappears.
+  mkdir -p "$DEST"
+  rsync -a --delete "$APP/" "$DEST/"
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R -trusted "$DEST"
   pluginkit -a "$DEST/Contents/PlugIns/PeepPreview.appex"
   pluginkit -e use -i com.lingrino.peep.preview
@@ -85,7 +85,7 @@ if [[ "${1:-}" == install ]]; then
   killall PeepPreview 2>/dev/null || true
   qlmanage -r >/dev/null 2>&1 || true
   qlmanage -r cache >/dev/null 2>&1 || true
-  # Restart the keyboard agent if it is registered (first registration happens when the app is opened).
-  launchctl kickstart -k "gui/$(id -u)/com.lingrino.peep.agent" 2>/dev/null || true
+  # (Re)load the keyboard agent LaunchAgent on the new binary.
+  "$DEST/Contents/MacOS/Peep" --register
   echo "installed $DEST"
 fi
