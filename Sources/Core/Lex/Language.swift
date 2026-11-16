@@ -96,6 +96,36 @@ public enum Language: UInt8, CaseIterable, Sendable {
         return nameMap[asciiLower(s)]
     }
 
+    /// Same lookup on raw bytes, no allocation: names of up to 16 bytes are lowercased and
+    /// packed into two words (fences resolve without building a String; was 6% of parsing
+    /// the CommonMark spec).
+    public static func named(_ p: UnsafePointer<UInt8>, _ n: Int) -> Language? {
+        guard n > 0, n <= 16 else {
+            return n > 16 ? named(String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)) : nil
+        }
+        return packedNameMap[NameKey(p, n)]
+    }
+
+    struct NameKey: Hashable {
+        var a: UInt64 = 0, b: UInt64 = 0
+        init(_ p: UnsafePointer<UInt8>, _ n: Int) {
+            for k in 0..<n {
+                var c = UInt64(p[k])
+                if c >= 0x41 && c <= 0x5A { c |= 0x20 }
+                if k < 8 { a |= c << (8 * UInt64(k)) } else { b |= c << (8 * UInt64(k - 8)) }
+            }
+        }
+    }
+
+    static let packedNameMap: [NameKey: Language] = {
+        var m: [NameKey: Language] = [:]
+        for (name, l) in nameMap {
+            let u = Array(name.utf8)
+            if u.count <= 16 { u.withUnsafeBufferPointer { m[NameKey($0.baseAddress!, u.count)] = l } }
+        }
+        return m
+    }()
+
     /// Lowercased language names, common aliases, and every file extension.
     static let nameMap: [String: Language] = {
         var m: [String: Language] = [:]

@@ -66,9 +66,13 @@ public enum MarkdownParser {
                     ctx.text.bytes.append(contentsOf: UnsafeBufferPointer(start: p + s, count: e - s))
                 }
                 if pb.info.1 > pb.info.0 {
-                    let info = String(decoding: UnsafeBufferPointer(start: p + Int(pb.info.0), count: Int(pb.info.1 - pb.info.0)), as: UTF8.self)
-                    let lang = info.split(whereSeparator: { $0 == " " || $0 == "{" || $0 == "," }).first.map(String.init) ?? ""
-                    b.language = Language.named(lang) ?? .plain
+                    // First word of the info string ("swift", "js {.line-numbers}", "rust,ignore").
+                    var a = Int(pb.info.0)
+                    let ie = Int(pb.info.1)
+                    while a < ie && (p[a] == 0x20 || p[a] == 0x7B || p[a] == 0x2C) { a += 1 }
+                    var z = a
+                    while z < ie && p[z] != 0x20 && p[z] != 0x7B && p[z] != 0x2C { z += 1 }
+                    b.language = Language.named(p + a, z - a) ?? .plain
                 }
             case .rule:
                 break

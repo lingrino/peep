@@ -734,11 +734,26 @@ final class BlockParser {
         let fe = Int(leafLines[1])
         while f < fe && (p[f] == 0x20 || p[f] == 0x09) { f += 1 }
         if f >= fe || p[f] != 0x5B { return }
+        // "[label]" must be followed by ":". When the label closes on the first line, check
+        // that before copying anything (link-list items like "[Foo](url)" start with "[").
+        var k = f + 1
+        while k < fe {
+            let c = p[k]
+            if c == 0x5C { k += 2; continue }
+            if c == 0x5B { return }   // unescaped "[" can't appear in a label
+            if c == 0x5D { if k + 1 >= fe || p[k + 1] != 0x3A { return }; break }
+            k += 1
+        }
         // Join the lines (definitions may span lines) into one scratch copy, then parse
         // consecutive definitions from a moving offset (one copy, not one per definition:
         // changelogs end with hundreds of them).
+        var total = 0
+        for k in stride(from: 0, to: leafLines.count, by: 2) { total += Int(leafLines[k + 1] - leafLines[k]) + 1 }
         var bytes: [UInt8] = []
+        bytes.reserveCapacity(total)
         var lineEnds: [Int] = []
+        lineEnds.reserveCapacity(leafLines.count / 2)
+        if refs.isEmpty { refs.reserveCapacity(16) }
         for k in stride(from: 0, to: leafLines.count, by: 2) {
             let s = Int(leafLines[k]), e = Int(leafLines[k + 1])
             bytes.append(contentsOf: UnsafeBufferPointer(start: p + s, count: e - s))

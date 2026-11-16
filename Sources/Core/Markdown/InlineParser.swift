@@ -375,7 +375,7 @@ enum InlineParser {
         if i + 1 < n && p[i + 1] == 0x28, let (e, d, _) = inlineLinkTail(p, i + 2, n) {
             dest = d
             end = e
-        } else {
+        } else if !ctx.refs.isEmpty {   // no definitions: skip building and folding labels
             if i + 1 < n && p[i + 1] == 0x5B, let close = findLabelEnd(p, i + 2, n) {
                 let label = close > i + 2
                     ? String(decoding: UnsafeBufferPointer(start: p + i + 2, count: close - i - 2), as: UTF8.self)
@@ -491,7 +491,13 @@ enum InlineParser {
 
     /// Resolves backslash escapes and entities in a link destination/title.
     static func unescape(_ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int) -> String {
+        // Most destinations/titles have no escapes or entities: one String straight from the
+        // source bytes (the byte-at-a-time rebuild was 25% of parse time on a link list).
+        if memchr(p + s, 0x5C, e - s) == nil && memchr(p + s, 0x26, e - s) == nil {
+            return String(decoding: UnsafeBufferPointer(start: p + s, count: e - s), as: UTF8.self)
+        }
         var out: [UInt8] = []
+        out.reserveCapacity(e - s)
         var k = s
         while k < e {
             if p[k] == 0x5C && k + 1 < e && isASCIIPunct(p[k + 1]) { out.append(p[k + 1]); k += 2; continue }
@@ -504,7 +510,22 @@ enum InlineParser {
 
     /// Case-folded, whitespace-collapsed reference label.
     static func normalizeLabel(_ s: String) -> String {
-        s.lowercased().split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).joined(separator: " ")
+        // ASCII fast path on bytes; split/joined/lowercased cost ~15% of parse time on docs
+        // with many bracketed spans.
+        var out: [UInt8] = []
+        out.reserveCapacity(s.utf8.count)
+        var space = false
+        for c in s.utf8 {
+            if c >= 0x80 { return normalizeLabelUnicode(s) }
+            if c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D { space = !out.isEmpty; continue }
+            if space { out.append(0x20); space = false }
+            out.append(c >= 0x41 && c <= 0x5A ? c | 0x20 : c)
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    static func normalizeLabelUnicode(_ s: String) -> String {
+        s.lowercased().split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" }).joined(separator: " ")
     }
 
     /// `[label]: dest "title"` at the start of `b`. Returns bytes consumed (through the line
@@ -665,6 +686,30 @@ enum InlineParser {
         return nil
     }
 
+    /// Lowercase ASCII bytes packed little-endian into a UInt64 (0 if longer than 8 bytes):
+    /// tag names compare as integers instead of allocated, lowercased Strings.
+    @inline(__always)
+    static func tagKey(_ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int) -> UInt64 {
+        if e - s > 8 || e <= s { return 0 }
+        var v: UInt64 = 0
+        for k in s..<e { v |= UInt64(p[k] | 0x20) << (8 * UInt64(k - s)) }
+        return v
+    }
+
+    static func tagKey(_ name: StaticString) -> UInt64 {
+        tagKey(name.utf8Start, 0, name.utf8CodeUnitCount)
+    }
+
+    enum Tag {
+        static let br = tagKey("br"), b = tagKey("b"), strong = tagKey("strong"), i = tagKey("i")
+        static let em = tagKey("em"), cite = tagKey("cite"), var_ = tagKey("var"), dfn = tagKey("dfn")
+        static let code = tagKey("code"), tt = tagKey("tt"), samp = tagKey("samp"), kbd = tagKey("kbd")
+        static let s = tagKey("s"), del = tagKey("del"), strike = tagKey("strike"), sub = tagKey("sub")
+        static let sup = tagKey("sup"), a = tagKey("a"), img = tagKey("img"), source = tagKey("source")
+        static let p = tagKey("p"), div = tagKey("div"), center = tagKey("center"), summary = tagKey("summary")
+        static let hr = tagKey("hr"), li = tagKey("li"), tr = tagKey("tr"), td = tagKey("td"), th = tagKey("th")
+    }
+
     /// Interprets one tag `p[i..<e]` (already known to be well-formed).
     static func htmlTag(_ p: UnsafePointer<UInt8>, _ i: Int, _ e: Int, _ st: inout State, _ ctx: InlineContext) {
         var k = i + 1
@@ -672,59 +717,73 @@ enum InlineParser {
         if closing { k += 1 }
         let ns = k
         while k < e && p[k] < 0x80 && (isAlnum(p[k]) || p[k] == 0x2D) { k += 1 }
-        let name = String(decoding: UnsafeBufferPointer(start: p + ns, count: k - ns), as: UTF8.self).lowercased()
-        let attrs = closing ? [:] : parseAttributes(p, k, e)
+        let name = tagKey(p, ns, k)
+        // Attributes are parsed only for the tags that read them.
+        func attrs() -> [String: String] { closing ? [:] : parseAttributes(p, k, e) }
         func style(_ s: MDStyle) {
             st.add(Node(kind: closing ? kClose : kOpen, c: Int32(s.rawValue)))
         }
         switch name {
-        case "br": st.add(Node(kind: kHard))
-        case "b", "strong": style(.strong)
-        case "i", "em", "cite", "var", "dfn": style(.emphasis)
-        case "code", "tt", "samp": style(.code)
-        case "kbd": style(.kbd)
-        case "s", "del", "strike": style(.strike)
-        case "sub": style(.subscriptStyle)
-        case "sup": style(.superscript)
-        case "a":
+        case Tag.br: st.add(Node(kind: kHard))
+        case Tag.b, Tag.strong, Tag.summary: style(.strong)
+        case Tag.i, Tag.em, Tag.cite, Tag.var_, Tag.dfn: style(.emphasis)
+        case Tag.code, Tag.tt, Tag.samp: style(.code)
+        case Tag.kbd: style(.kbd)
+        case Tag.s, Tag.del, Tag.strike: style(.strike)
+        case Tag.sub: style(.subscriptStyle)
+        case Tag.sup: style(.superscript)
+        case Tag.a:
             if closing { st.add(Node(kind: kLinkClose)) }
-            else if let href = attrs["href"] {
+            else if let href = attrs()["href"] {
                 let ref = Int32(ctx.links.count)
                 ctx.links.append(href)
                 st.add(Node(kind: kLinkOpen, c: ref))
             }
-        case "img":
-            if let src = attrs["src"] {
-                var img = MDImage(url: src, alt: attrs["alt"] ?? "")
-                img.width = number(attrs["width"])
-                img.height = number(attrs["height"])
+        case Tag.img:
+            let at = attrs()
+            if let src = at["src"] {
+                var img = MDImage(url: src, alt: at["alt"] ?? "")
+                img.width = number(at["width"])
+                img.height = number(at["height"])
                 if let dark = ctx.pendingDarkSource { img.darkURL = dark; ctx.pendingDarkSource = nil }
                 let ref = Int32(ctx.images.count)
                 ctx.images.append(img)
                 st.add(Node(kind: kImageAtom, c: ref))
             }
-        case "source":
+        case Tag.source:
             // <picture><source media="(prefers-color-scheme: dark)" srcset="..."><img ...></picture>
-            if let media = attrs["media"], media.contains("dark"), let set = attrs["srcset"] {
-                ctx.pendingDarkSource = set.split(separator: " ").first.map(String.init)
+            let at = attrs()
+            if let media = at["media"], hasBytes(media, "dark"), let set = at["srcset"] {
+                let u = set.utf8
+                ctx.pendingDarkSource = String(set[..<(u.firstIndex(of: 0x20) ?? u.endIndex)])   // first URL
             }
-        case "p", "div", "center":
+        case Tag.p, Tag.div, Tag.center:
             if !closing {
-                if name == "center" || attrs["align"]?.lowercased() == "center" { ctx.blockAlign = .center }
-                else if attrs["align"]?.lowercased() == "right" { ctx.blockAlign = .right }
+                let align = attrs()["align"]?.lowercased()
+                if name == Tag.center || align == "center" { ctx.blockAlign = .center }
+                else if align == "right" { ctx.blockAlign = .right }
             }
             if st.tail >= 0 { st.add(Node(kind: kHard)) }
-        case "h1", "h2", "h3", "h4", "h5", "h6":
+        case _ where k - ns == 2 && p[ns] | 0x20 == 0x68 && p[ns + 1] >= 0x31 && p[ns + 1] <= 0x36:   // h1-h6
             if !closing {
-                ctx.blockHeading = UInt8(name.dropFirst()) ?? 1
-                if attrs["align"]?.lowercased() == "center" { ctx.blockAlign = .center }
+                ctx.blockHeading = p[ns + 1] - 0x30
+                if attrs()["align"]?.lowercased() == "center" { ctx.blockAlign = .center }
             }
-        case "summary": style(.strong)
-        case "hr": ctx.sawRule = true
-        case "li": if !closing { if st.tail >= 0 { st.add(Node(kind: kHard)) }; st.text("• ") }
-        case "tr": if closing { st.add(Node(kind: kHard)) }
-        case "td", "th": if closing { st.text("  ") }
+        case Tag.hr: ctx.sawRule = true
+        case Tag.li: if !closing { if st.tail >= 0 { st.add(Node(kind: kHard)) }; st.text("• ") }
+        case Tag.tr: if closing { st.add(Node(kind: kHard)) }
+        case Tag.td, Tag.th: if closing { st.text("  ") }
         default: break   // unknown tags are dropped; their text content stays
+        }
+    }
+
+    /// Substring test on UTF-8 bytes. (`String.contains` and `utf8.firstRange(of:)` are
+    /// generic searches with runtime metadata lookups: 20% of a small README's parse.)
+    static func hasBytes(_ s: String, _ needle: StaticString) -> Bool {
+        var s = s
+        return s.withUTF8 { b in
+            guard let base = b.baseAddress else { return false }
+            return memmem(base, b.count, needle.utf8Start, needle.utf8CodeUnitCount) != nil
         }
     }
 

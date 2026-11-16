@@ -130,6 +130,12 @@ let markdownTests: [Test] = [
             "P^|![Logo](logo.png)", "P|Press <kbd>⌘</kbd>+**F**⏎next",
         ])
     },
+    Test("md: html tag names match exactly") {
+        expectMD("<STRONG>a</STRONG> <a2>b</a2> <h7>c</h7> <Kbd>k</Kbd> <code>x</code>", [
+            "P|**a** b c <kbd>k</kbd> `x`",
+        ])
+        expectMD("<h3 align=\"center\">Title</h3>", ["H3^|Title"])
+    },
     Test("md: front matter hidden, rules, footnotes") {
         expectMD("---\ntitle: x\n---\n# Doc\n\n---\n\nText[^1]\n\n[^1]: Note", [
             "H1|Doc", "HR|", "P|Text^1^", "P|^1^ Note",

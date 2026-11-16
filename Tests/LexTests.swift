@@ -117,6 +117,14 @@ let lexTests: [Test] = [
         expectEqual(d(".zshrc"), .shell); expectEqual(d("x.TSX"), .typescript); expectEqual(d("run", "#!/usr/bin/env python3\n"), .python)
         expectEqual(d("Gemfile"), .ruby); expectEqual(d(".env.local"), .dotenv); expectEqual(d("a.unknown"), .plain)
         expectEqual(Language.named("c++"), .cpp); expectEqual(Language.named("Swift"), .swift); expectEqual(Language.named("sh"), .shell)
+        // Byte lookup agrees with the String lookup for every name, in any case.
+        func bytes(_ s: String) -> Language? { Array(s.utf8).withUnsafeBufferPointer { Language.named($0.baseAddress!, $0.count) } }
+        for name in Language.nameMap.keys {
+            expectEqual(bytes(name), Language.named(name))
+            expectEqual(bytes(name.uppercased()), Language.named(name))
+        }
+        expectEqual(bytes("JavaScript"), .javascript); expectEqual(bytes("nope"), nil)
+        expectEqual(bytes("averyveryverylonglanguagename"), nil)
     },
     Test("robustness: every language survives garbage") {
         var rng = SystemRandomNumberGenerator()
