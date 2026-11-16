@@ -8,7 +8,12 @@ press Space, and get a syntax-highlighted (or rendered) preview. Press ⌘F to s
 - **Markdown**: CommonMark + GitHub extensions (tables, task lists, strikethrough, autolinks,
   footnotes), highlighted code blocks, images (local and remote), a common subset of inline
   HTML, and a table-of-contents sidebar.
+- **Outline**: a sidebar of headings (Markdown) or declarations (code) that follows the scroll.
 - **Find**: ⌘F, ⌘G/⇧⌘G, Return/⇧Return, Esc — incremental, smart-case, SIMD search.
+- **Archives**: ZIP-family (zip, jar, whl, apk, …), tar, tar.gz, tar.xz listed as a tree;
+  single `.gz`/`.xz` files previewed decompressed.
+- **Jupyter notebooks**, **SQLite databases** (tables, schema, first rows), **minified JSON**
+  (re-indented), **logs** (opened at the end), and wrapped names like `config.yml.dist`.
 - **Binary files**: property lists shown as XML, everything else as a hex dump.
 
 Everything is native (Core Text, no web views) and dependency-free. Built for macOS 27 on

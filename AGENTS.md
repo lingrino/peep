@@ -50,10 +50,11 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 
 | Path | What |
 |---|---|
-| `Sources/Core/Text/` | `TextBuffer` (padded bytes), `FileLoader`, `Decoder` (encodings/binary), `LineIndex` (SIMD), `Search` (SIMD), `SIMD.swift` helpers, `HexDump` |
-| `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, markdown source), `Language` (detection table + dispatch) |
-| `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities` |
-| `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline), `Prewarm` (launch-time warm-up) |
+| `Sources/Core/Text/` | `TextBuffer` (padded bytes), `FileLoader` (incl. tail loads), `Decoder` (encodings/binary), `LineIndex` (SIMD), `Search` (SIMD), `SIMD.swift` helpers, `HexDump`, `JSONFormatter` (minified JSON), `JSONTree` (range-based JSON parse), `ByteOutput` (generated text), `Clock` |
+| `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, markdown source), `Language` (detection table, wrapper suffixes, dispatch), `CodeOutline` (declarations -> sidebar entries) |
+| `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities`, `Notebook` (.ipynb -> Markdown) |
+| `Sources/Core/Archive/` | `ArchiveListing` (entries SoA, folder tree, text + tokens), `ZipReader` (central directory), `TarReader` (headers, pax/GNU), `Decompress` (gzip/xz streams, single compressed files) |
+| `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline: archives, compressed files, SQLite, notebooks, minified JSON, logs), `SQLitePreview`, `Prewarm` (launch-time warm-up) |
 | `Sources/Preview/` | `main.swift` (starts `Prewarm`, then `NSExtensionMain`), principal class `PreviewViewController`, `AgentClient` |
 | `Sources/App/` | Host app, agent |
 | `Dev/` | `peep-dev` tool: `render`, `bench`, `lexbench`, `parsebench`, `mddump`, `mdbench`, `firstpaint`, `findbench`, `smoke`, `tokens`, `layout`, `types`, `icon` |
@@ -78,6 +79,7 @@ Scripts/dev.sh parsebench <file.md|dir> [N]   # markdown parse throughput (dir: 
 Scripts/dev.sh mddump <outdir> <files/dirs...>  # full dump per parsed .md: diff -r old/new dumps around parser changes
 Scripts/dev.sh findbench <file> <query...>  # raw search vs full find path per query
 Scripts/dev.sh jumpbench <file.md...>      # table-of-contents jump cost (scroll + tile draws)
+Scripts/dev.sh symbols <files...>          # code outline entries as the sidebar shows them
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
@@ -150,6 +152,25 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 - A search for each line's end mispredicted its exit on most lines; `newlineOffsets` finds all
   of them in one branch-light pass (64-byte masks, flattened as in `LineIndex`).
 
+## Previews beyond source and Markdown
+
+- **Archives** (`ArchiveKind`): never loaded; ZIP from the central directory, tar from headers,
+  tar.gz/xz streamed. 25 ms budget, then the background pass swaps in the full listing
+  (`CodeContent.replace` + `onContentReplaced`); renders over 25k entries are deferred. The
+  tree is built from each entry's folder chain (no global sort: that was 344 ms for 150k).
+- **Single .gz/.xz** files preview their content (40 ms decompression budget).
+- **Notebooks** become Markdown (`Notebook`); outputs are ```` ```output ```` fences, drawn
+  with a rule instead of the code background (`MDBlock.output`).
+- **SQLite**: read-only + `immutable` URI; never plain `count(*)` (uninterruptible B-tree
+  walk), count to 100k in an interruptible scan, else `max(rowid)`.
+- **Minified JSON** is re-indented (average line > 200 bytes); progressive above 1 MB.
+- **Logs** open at the end; >64 MB logs load their last 64 MB.
+- **Wrapper suffixes** (`.dist`, `.example`, `.in`, `.j2`, ...) are looked through by
+  `Language.detect`; each wrapper is one registered type.
+- **Code outline**: the lexer records declarations (`TokenStream.addSymbol`) from declaring
+  keywords, Go receivers, and keywordless C-family definitions; `CodeOutline` titles and levels
+  them. Sidebar for files of 60+ lines with 3+ symbols.
+
 ## Benchmarks and the bar
 
 The owner set pierre's Wasm `highlights` and `words` (pierrecomputer/pierre) as the *minimum*
@@ -186,7 +207,11 @@ as a fix with a test), and stay clean under `-sanitize=address`.
 
 - QL matches **exact** UTIs only (no conformance). Many extensions have *dynamic* UTIs
   (`dyn.a…`), computed in `Dev/main.swift:dynamicUTI`. Extensionless files are `public.data`.
-- Apple's previewers win for `public.plain-text`, `public.html`, CSV — listing them is harmless.
+- Apple's built-in previewers win for some standard types whatever we list (measured in Finder):
+  `.txt` (`public.plain-text`), `.csv` (the system Office generator claims it), `.pdf`, `.html`,
+  `.svg`. For others Apple also claims (JSON, XML) and everything else, Peep wins. So Peep doesn't
+  build features only the losing types would need (a CSV/TSV table view would only ever reach
+  TSV). Check a type with: reveal a file in Finder's column view and look for Peep's `prepare` log.
 - Keyboard: see Processes. Never call `makeFirstResponder` (another app's extension broke
   Finder's arrow keys that way); `DocumentView.acceptsFirstResponder` is false.
 - Sandbox: no network (agent fetches), no `NSWorkspace.open` (agent opens), reading files next
