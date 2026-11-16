@@ -53,6 +53,7 @@ final class InlineParser {
     var label: ByteBuf      // normalized reference labels, attribute values
     var tmp: ByteBuf        // link text for labels
     var cells: RawArray<Int32>   // `splitCells` output, pairs
+    var attrList: RawArray<Int32>   // `splitAttributes` output, quads
 
     // The document being built.
     var out: ByteBuf
@@ -95,6 +96,7 @@ final class InlineParser {
         label = ByteBuf(capacity: 64, &arena)
         tmp = ByteBuf(capacity: 64, &arena)
         cells = RawArray(capacity: 32, &arena)
+        attrList = RawArray(capacity: 32, &arena)
         links = RawArray(capacity: 32, &arena)
         images = RawArray(capacity: 8, &arena)
         runs = RawArray(capacity: min(n / 32 + 16, 1024), &arena)
@@ -105,7 +107,7 @@ final class InlineParser {
 
     deinit {
         nodes.free(); delims.free(); brackets.free(); scratch.free()
-        gather.free(); label.free(); tmp.free(); cells.free()
+        gather.free(); label.free(); tmp.free(); cells.free(); attrList.free()
         runs.free(); links.free(); images.free()
         refSlots?.deallocate()
         if !finished { out.free(); strings.free() }
@@ -972,10 +974,24 @@ final class InlineParser {
         while k < e && p[k] < 0x80 && (InlineParser.isAlnum(p[k]) || p[k] == 0x2D) { k += 1 }
         let name = InlineParser.tagKey(p, ns, k)
         let attrs = k
-        // Attributes are read only for the tags that use them (never on closing tags).
+        // Attributes are split once, on first use, and only for the tags that read them
+        // (never closing tags). The last attribute of a name wins.
+        var split = false
         func attr(_ wanted: StaticString, into buf: inout ByteBuf) -> Bool {
             if closing { return false }
-            return InlineParser.attribute(p, attrs, e, wanted, into: &buf)
+            if !split { InlineParser.splitAttributes(p, attrs, e, into: &attrList); split = true }
+            let wl = wanted.utf8CodeUnitCount
+            var q = attrList.count - 4
+            while q >= 0 {
+                let s = Int(attrList[q])
+                if Int(attrList[q + 1]) - s == wl && BlockParser.lowerEquals(p + s, wanted) {
+                    let vs = Int(attrList[q + 2]), ve = Int(attrList[q + 3])
+                    if ve > vs { InlineParser.unescape(p, vs, ve, into: &buf) }
+                    return true
+                }
+                q -= 4
+            }
+            return false
         }
         func style(_ s: MDStyle) {
             add(closing ? InlineParser.kClose : InlineParser.kOpen, c: Int32(s.rawValue))
@@ -1075,23 +1091,33 @@ final class InlineParser {
     /// HTML length attribute: "120" or "120px" -> 120; "50%" -> -50 (percent of the content
     /// width, resolved at layout).
     static func number(_ b: ByteBuf) -> Float {
+        // Plain ASCII digits (and units, which the filter drops): no String or float parsing.
+        var v = 0, digits = 0, fast = true
+        for k in 0..<b.count {
+            let c = b.p[k]
+            if c >= 0x80 || c == 0x2E { fast = false; break }
+            if c >= 0x30 && c <= 0x39 { v = v &* 10 &+ Int(c - 0x30); digits += 1 }
+        }
+        if fast && digits <= 18 {
+            let f: Float = digits == 0 ? 0 : Float(v)   // Float("") is nil -> 0
+            return b.count > 0 && b.p[b.count - 1] == 0x25 ? -min(f, 100) : f
+        }
         let s = b.string(0, b.count)
-        let v = Float(s.filter { $0.isNumber || $0 == "." }) ?? 0
-        return s.hasSuffix("%") ? -min(v, 100) : v
+        let x = Float(s.filter { $0.isNumber || $0 == "." }) ?? 0
+        return s.hasSuffix("%") ? -min(x, 100) : x
     }
 
-    /// Value of the last attribute named `wanted` (lowercase literal; names compare
-    /// ASCII-case-insensitively) in `p[s..<e]`, unescaped into `buf`. False if absent.
-    static func attribute(_ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int, _ wanted: StaticString, into buf: inout ByteBuf) -> Bool {
+    /// Attributes of a tag (`p[s..<e]` after its name) as quads in `out`: name start, name end,
+    /// value start, value end (raw, still escaped; an empty range for a bare attribute).
+    static func splitAttributes(_ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int, into out: inout RawArray<Int32>) {
+        out.count = 0
         var k = s
-        var vs = -1, ve = -1, found = false
-        let wl = wanted.utf8CodeUnitCount
         while k < e {
             while k < e && (isWhite(p[k]) || p[k] == 0x2F) { k += 1 }
             let ns = k
             while k < e && p[k] != 0x3D && !isWhite(p[k]) && p[k] != 0x3E && p[k] != 0x2F { k += 1 }
             if k == ns { k += 1; continue }
-            let match = k - ns == wl && BlockParser.lowerEquals(p + ns, wanted)
+            let ne = k
             while k < e && isWhite(p[k]) { k += 1 }
             var a = 0, b = 0
             if k < e && p[k] == 0x3D {
@@ -1110,10 +1136,8 @@ final class InlineParser {
                     b = k
                 }
             }
-            if match { vs = a; ve = b; found = true }
+            out.append(Int32(ns)); out.append(Int32(ne)); out.append(Int32(a)); out.append(Int32(b))
         }
-        if found && ve > vs { unescape(p, vs, ve, into: &buf) }
-        return found
     }
 
     // MARK: - Emphasis (CommonMark "process emphasis")

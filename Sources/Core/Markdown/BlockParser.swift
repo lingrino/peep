@@ -65,6 +65,7 @@ final class BlockParser {
 
     var blocks: RawArray<PendingBlock>
     var lines: RawArray<Int32>       // leaf content lines, pairs (start, end)
+    var newlines: RawArray<UInt32>   // offset of every "\n" (see `run`)
     var lists: RawArray<ListInfo>
     var aligns: RawArray<MDAlign>
     var lastLineBlank = false
@@ -80,18 +81,17 @@ final class BlockParser {
         aligns = RawArray(capacity: 16, &arena)
         blocks = RawArray(capacity: min(n / 64 + 16, 512), &arena)
         lines = RawArray(capacity: min(n / 16 + 32, 2048), &arena)
+        newlines = RawArray(capacity: min(n / 24 + 64, 4096), &arena)
     }
 
     deinit {
-        stack.free(); blocks.free(); lines.free(); lists.free(); aligns.free()
+        stack.free(); blocks.free(); lines.free(); lists.free(); aligns.free(); newlines.free()
     }
 
     // MARK: - Driver
 
     func run() {
         var i = skipFrontMatter()
-        var newlines = RawArray<UInt32>(capacity: n / 24 + 64)
-        defer { newlines.free() }
         newlineOffsets(p, i, n, into: &newlines)
         let nlp = newlines.p, nlc = newlines.count
         var k = 0
@@ -763,7 +763,10 @@ final class BlockParser {
         "picture", "source"].map { (s: StaticString) in InlineParser.tagKey(s) }
 
     static func isBlockTag(_ key: UInt64, _ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int) -> Bool {
-        if key != 0 { return blockTagKeys.contains(key) }
+        if key != 0 {
+            for k in blockTagKeys where k == key { return true }
+            return false
+        }
         if e - s != 10 { return false }
         return lowerEquals(p + s, "blockquote") || lowerEquals(p + s, "figcaption")
     }
