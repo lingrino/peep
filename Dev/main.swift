@@ -599,6 +599,18 @@ func jumpBench(_ args: [String]) {
     }
 }
 
+/// The code outline for files: `peep-dev symbols a.swift b.go`.
+@MainActor
+func symbolsDump(_ args: [String]) {
+    for f in args {
+        let d = Document.open(path: f)
+        guard let c = d.content as? CodeContent, let t = c.tokens else { print("\(f): not code"); continue }
+        let syms = CodeOutline.symbols(c.text, c.lines, t)
+        print("== \((f as NSString).lastPathComponent) (\(c.language.name)): \(syms.count) symbols")
+        for s in syms.prefix(60) { print(String(repeating: "  ", count: s.level) + s.title + "  :\(s.line + 1)") }
+    }
+}
+
 /// Boxes whose line baselines fall outside their rect, or that overlap the next block.
 @MainActor
 func mdGeometryErrors(_ md: MarkdownContent) -> [String] {
@@ -640,6 +652,7 @@ MainActor.assumeIsolated {
     case "firstpaint": firstPaint(Array(args.dropFirst()))
     case "findbench": findBench(Array(args.dropFirst()))
     case "jumpbench": jumpBench(Array(args.dropFirst()))
+    case "symbols": symbolsDump(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
     case "parsebench": parsebench(Array(args.dropFirst()))
     case "mddump": mdDump(Array(args.dropFirst()))

@@ -48,12 +48,12 @@ final class OutlineView: NSView {
         list.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(bounds.height, list.contentHeight))
     }
 
-    func setHeadings(_ hs: [MDHeading]) {
-        let minLevel = hs.map(\.level).min() ?? 1
-        items = hs.filter { $0.level <= max(3, minLevel + 1) }.map {
-            Item(level: $0.level - minLevel, title: $0.title)
-        }
-        indexMap = hs.indices.filter { hs[$0].level <= max(3, minLevel + 1) }
+    /// Entries deeper than one level below the shallowest (or than H3) are left out.
+    func setEntries(_ es: [OutlineEntry]) {
+        let minLevel = es.map(\.level).min() ?? 1
+        let keep = max(3, minLevel + 1)
+        items = es.filter { $0.level <= keep }.map { Item(level: $0.level - minLevel, title: $0.title) }
+        indexMap = es.indices.filter { es[$0].level <= keep }
         list.current = -1
         list.needsDisplay = true
         needsLayout = true

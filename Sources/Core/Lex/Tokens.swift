@@ -47,6 +47,20 @@ public final class TokenStream: @unchecked Sendable {
     /// End of the last token (the stream covers `[0, covered)`).
     public private(set) var covered = 0
 
+    /// Declarations seen while lexing (the code outline): name range, `.function`/`.type`,
+    /// and where the declaration's title starts (its keyword, e.g. "func", or the name).
+    public private(set) var symbolStart: [UInt32] = []
+    public private(set) var symbolEnd: [UInt32] = []
+    public private(set) var symbolKind: [UInt8] = []
+    public private(set) var symbolTitleStart: [UInt32] = []
+
+    public func addSymbol(_ start: Int, _ end: Int, _ kind: TokenKind, titleStart: Int) {
+        symbolStart.append(UInt32(truncatingIfNeeded: start))
+        symbolEnd.append(UInt32(truncatingIfNeeded: end))
+        symbolKind.append(kind.rawValue)
+        symbolTitleStart.append(UInt32(truncatingIfNeeded: titleStart))
+    }
+
     public init(expectedBytes: Int) {
         capacity = max(256, expectedBytes / 6)
         ends = .allocate(capacity: capacity)

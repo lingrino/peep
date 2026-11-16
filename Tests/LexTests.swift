@@ -140,4 +140,18 @@ let lexTests: [Test] = [
             for l in Language.allCases { _ = lexed(l, s) }
         }
     },
+    Test("outline: declarations from the lexer") {
+        func syms(_ lang: Language, _ src: String) -> [String] {
+            let t = TextBuffer(src), li = LineIndex(t), tk = TokenStream(expectedBytes: t.count)
+            lang.lex(t.base, 0, t.count, tk)
+            return CodeOutline.symbols(t, li, tk).map { String(repeating: ">", count: $0.level) + $0.title }
+        }
+        expectEqual(syms(.go, "type T struct {}\nfunc (t *T) Run() {\n\tf := func(x int) int { return x }\n}\nfunc main() {}\n"),
+                    ["type T", "T.Run", "main"])
+        expectEqual(syms(.c, "struct node { int v; };\nstatic int add(int a, int b) {\n  struct node n; return helper(a);\n}\nint proto(void);\n"),
+                    ["struct node", "add"])
+        expectEqual(syms(.java, "class A {\n  void run() {\n    new Thread() { };\n    go(x);\n  }\n}\n"), ["class A", ">run"])
+        expectEqual(syms(.kotlin, "@file:Opt(Foo::class)\nclass C {\n  fun f() {}\n}\n"), ["class C", ">f"])
+        expectEqual(syms(.python, "class A:\n    def m(self):\n        def inner(): pass\ndef top(): pass\n"), ["class A", ">m", ">>inner", "top"])
+    },
 ]

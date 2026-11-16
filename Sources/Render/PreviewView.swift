@@ -73,11 +73,39 @@ public final class PreviewView: NSView {
     }
 
     private func updateOutlineCurrent() {
-        guard let o = outline, !o.isHidden, let md = document?.content as? MarkdownContent else { return }
-        let top = scrollView.contentView.bounds.minY + 40
-        var cur = -1
-        for (i, y) in md.headingY.enumerated() where y <= top { cur = i }
-        o.setCurrent(heading: max(0, cur))
+        guard let o = outline, !o.isHidden, let c = document?.content else { return }
+        o.setCurrent(heading: max(0, c.outlineIndex(atY: scrollView.contentView.bounds.minY + 40)))
+    }
+
+    /// Sidebar for Markdown headings and code declarations (3 or more entries).
+    private func installOutline(_ c: DocumentContent) {
+        let entries = c.outlineEntries
+        guard entries.count >= 3 else { return }
+        let o = OutlineView(frame: NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height))
+        o.setEntries(entries)
+        o.lateClickHandled = { [weak self] e in self?.lateMouseDown(e) ?? false }
+        o.onSelect = { [weak self] i in
+            guard let self, let y = self.document?.content.outlineY(i) else { return }
+            self.documentView.scrollToTop(y: y - 12)
+        }
+        addSubview(o, positioned: .below, relativeTo: scrollView)
+        outline = o
+        needsLayout = true
+    }
+
+    /// Background work changed the content's entries (full lex of a big file).
+    private func refreshOutline() {
+        guard let c = document?.content else { return }
+        if let o = outline {
+            o.setEntries(c.outlineEntries)
+            updateOutlineCurrent()
+        } else {
+            installOutline(c)
+            if outline != nil {
+                layoutSubtreeIfNeeded()
+                clipFrameChanged()
+            }
+        }
     }
 
     private func handleLink(_ l: String) {
@@ -99,11 +127,15 @@ public final class PreviewView: NSView {
 
     public func show(_ doc: Document) {
         document = doc
-        doc.onUpdate = { [weak self] in self?.documentView.invalidateAll() }
+        doc.onUpdate = { [weak self] in
+            self?.documentView.invalidateAll()
+            self?.refreshOutline()
+        }
         doc.onContentReplaced = { [weak self] in
             guard let self else { return }
             self.documentView.contentDidChangeLayout()
             if self.isFinding { _ = self.find(self.findBar.queryString) }   // offsets past the old end
+            self.refreshOutline()
         }
         outline?.removeFromSuperview()
         outline = nil
@@ -116,21 +148,9 @@ public final class PreviewView: NSView {
                 self?.documentView.contentDidChangeLayout()
                 self?.updateOutlineCurrent()
             }
-            if md.doc.headings.count >= 3 {
-                let o = OutlineView(frame: NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height))
-                o.setHeadings(md.doc.headings)
-                o.lateClickHandled = { [weak self] e in self?.lateMouseDown(e) ?? false }
-                o.onSelect = { [weak self, weak md] i in
-                    guard let md else { return }
-                    md.finishLayout()
-                    guard i < md.headingY.count else { return }
-                    self?.documentView.scrollToTop(y: md.headingY[i] - 12)
-                }
-                addSubview(o, positioned: .below, relativeTo: scrollView)
-                outline = o
-            }
             needsLayout = true
         }
+        installOutline(doc.content)
         notice?.removeFromSuperview()
         notice = nil
         if let text = doc.notice {

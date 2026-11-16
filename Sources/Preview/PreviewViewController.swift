@@ -130,7 +130,10 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
         let screen = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
         switch doc.kind {
         case .code:
-            let w = min(max(c.size.width + c.gutterWidth + 24, 560), screen.width * 0.7)
+            // Room for the symbol sidebar (shown from 780 pt) when the file has one.
+            let side = c.outlineEntries.count >= 3
+            let w = min(side ? max(c.size.width + c.gutterWidth + 24 + OutlineView.width, 780) : max(c.size.width + c.gutterWidth + 24, 560),
+                        screen.width * 0.7)
             let h = min(max(c.size.height + 8, 240), screen.height * 0.8)
             return NSSize(width: w.rounded(), height: h.rounded())
         case .markdown:

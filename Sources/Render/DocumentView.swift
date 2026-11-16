@@ -34,6 +34,12 @@ public protocol DocumentContent: AnyObject {
     func anchorY(_ name: String) -> CGFloat?
     /// About to show `rect` (content space): finish any deferred layout it needs.
     func willShow(_ rect: CGRect)
+    /// Sidebar entries (Markdown headings, code declarations); fewer than 3 = no sidebar.
+    var outlineEntries: [OutlineEntry] { get }
+    /// Content y of entry `i` (exact: may finish deferred layout).
+    func outlineY(_ i: Int) -> CGFloat?
+    /// The entry whose section contains content y (-1 above the first).
+    func outlineIndex(atY y: CGFloat) -> Int
     /// Height of the viewport, before `layout(width:)`: how much content must be exact for
     /// the first frame (markdown lays out the rest in the background).
     func setViewportHeight(_ h: CGFloat)
@@ -46,7 +52,16 @@ extension DocumentContent {
     public func setPalette(_ p: Palette) -> Bool { false }
     public func anchorY(_ name: String) -> CGFloat? { nil }
     public func willShow(_ rect: CGRect) {}
+    public var outlineEntries: [OutlineEntry] { [] }
+    public func outlineY(_ i: Int) -> CGFloat? { nil }
+    public func outlineIndex(atY y: CGFloat) -> Int { -1 }
     public func setViewportHeight(_ h: CGFloat) {}
+}
+
+/// One row of the outline sidebar.
+public struct OutlineEntry: Sendable {
+    public let level: Int
+    public let title: String
 }
 
 /// Selection and find state handed to the content's draw call.

@@ -431,6 +431,19 @@ public final class MarkdownContent: DocumentContent {
         return nil
     }
 
+    public var outlineEntries: [OutlineEntry] { doc.headings.map { OutlineEntry(level: $0.level, title: $0.title) } }
+
+    public func outlineY(_ i: Int) -> CGFloat? {
+        finishLayout()
+        return i < headingY.count ? headingY[i] : nil
+    }
+
+    public func outlineIndex(atY y: CGFloat) -> Int {
+        var cur = -1
+        for (i, hy) in headingY.enumerated() where hy <= y { cur = i }
+        return cur
+    }
+
     public func anchorY(_ name: String) -> CGFloat? {
         finishLayout()
         let n = name.hasPrefix("#") ? String(name.dropFirst()) : name

@@ -38,33 +38,33 @@ public enum Specs {
 
     public static let c = CLikeSpec(keywords: KeywordTable([
         (K, cKeywords), (T, "struct"), (Y, cTypes), (C, "NULL true false nullptr"),
-    ])) { s in s.hashPreprocessor = true; s.capitalizedTypes = false }
+    ])) { s in s.hashPreprocessor = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 1 }
 
     public static let cpp = CLikeSpec(keywords: KeywordTable([
         (K, cKeywords + " catch co_await co_return co_yield concept consteval constinit const_cast decltype delete dynamic_cast explicit export final friend mutable namespace new noexcept operator override private protected public reinterpret_cast requires static_cast template throw try typeid typename using virtual and or not xor and_eq or_eq not_eq bitand bitor compl import module"),
         (T, "class struct"), (Y, cTypes + " char8_t char16_t char32_t auto"),
         (C, "NULL true false nullptr"), (B, "this std"),
-    ])) { s in s.hashPreprocessor = true; s.cppRawStrings = true; s.capitalizedTypes = false }
+    ])) { s in s.hashPreprocessor = true; s.cppRawStrings = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 3 }
 
     public static let objc = CLikeSpec(keywords: KeywordTable([
         (K, cKeywords + " interface implementation end protocol property synthesize dynamic optional required class selector encode synchronized try catch finally throw autoreleasepool import package private public protected nonatomic atomic strong weak copy assign readonly readwrite nullable nonnull __block __weak __strong instancetype in out inout oneway bycopy byref"),
         (T, "struct"), (Y, cTypes + " id BOOL SEL IMP Class NSInteger NSUInteger CGFloat"),
         (C, "NULL nil Nil YES NO true false"), (B, "self super"),
-    ])) { s in s.hashPreprocessor = true; s.atKeywords = true }
+    ])) { s in s.hashPreprocessor = true; s.atKeywords = true; s.keywordlessDefinitionDepth = 1 }
 
     public static let csharp = CLikeSpec(keywords: KeywordTable([
         (K, "abstract as base break case catch checked const continue default delegate do else event explicit extern finally fixed for foreach goto if implicit in internal is lock namespace new operator out override params private protected public readonly ref return sealed sizeof stackalloc static switch throw try typeof unchecked unsafe using virtual volatile while add alias ascending async await by descending dynamic equals from get global group init into join let nameof notnull on orderby partial remove select set unmanaged value var when where with yield required scoped file"),
         (T, "class struct interface enum record"),
         (Y, "bool byte char decimal double float int long object sbyte short string uint ulong ushort void nint nuint"),
         (C, "true false null"), (B, "this"),
-    ])) { s in s.hashPreprocessor = true; s.csharpStrings = true; s.tripleQuotes = true }
+    ])) { s in s.hashPreprocessor = true; s.csharpStrings = true; s.tripleQuotes = true; s.keywordlessDefinitionDepth = 3 }
 
     public static let java = CLikeSpec(keywords: KeywordTable([
         (K, "abstract assert break case catch const continue default do else exports extends final finally for goto if implements import instanceof module native new non-sealed open opens package permits private protected provides public requires return sealed static strictfp super switch synchronized throw throws to transient transitive try uses var volatile when while with yield"),
         (T, "class interface enum record"),
         (Y, "boolean byte char double float int long short void"),
         (C, "true false null"), (B, "this super"),
-    ])) { s in s.atAttribute = true; s.tripleQuotes = true }
+    ])) { s in s.atAttribute = true; s.tripleQuotes = true; s.keywordlessDefinitionDepth = 2 }
 
     public static let kotlin = CLikeSpec(keywords: KeywordTable([
         (K, "as break continue do else for if in is return throw try catch finally when while by constructor delegate dynamic field file get import init param property receiver set setparam where actual abstract annotation companion const crossinline data enum expect external final infix inline inner internal lateinit noinline open operator out override private protected public reified sealed suspend tailrec vararg package typealias val var value"),
@@ -109,7 +109,7 @@ public enum Specs {
         (Y, "bool byte complex64 complex128 error float32 float64 int int8 int16 int32 int64 rune string uint uint8 uint16 uint32 uint64 uintptr any comparable"),
         (C, "true false nil iota"),
         (B, "append cap clear close complex copy delete imag len make max min new panic print println real recover"),
-    ])) { s in s.backtick = .raw; s.capitalizedTypes = false }
+    ])) { s in s.backtick = .raw; s.capitalizedTypes = false; s.goReceivers = true }
 
     public static let rust = CLikeSpec(keywords: KeywordTable([
         (K, "as async await break const continue crate dyn else extern for if impl in let loop match mod move mut pub ref return static unsafe use where while yield box macro_rules union"),

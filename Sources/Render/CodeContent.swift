@@ -55,7 +55,39 @@ public final class CodeContent: DocumentContent {
         positions.deallocate()
     }
 
-    public func setTokens(_ t: TokenStream) { tokens = t }
+    public func setTokens(_ t: TokenStream) { tokens = t; symbols = nil }
+
+    // MARK: - Outline
+
+    /// Declarations from the lexer (built on first use; reset when tokens change).
+    private var symbols: [CodeSymbol]?
+
+    private func codeSymbols() -> [CodeSymbol] {
+        if let s = symbols { return s }
+        let s = tokens.map { CodeOutline.symbols(text, lines, $0) } ?? []
+        symbols = s
+        return s
+    }
+
+    /// Only files long enough to navigate get a sidebar.
+    public var outlineEntries: [OutlineEntry] {
+        lines.count < 60 ? [] : codeSymbols().map { OutlineEntry(level: $0.level, title: $0.title) }
+    }
+
+    public func outlineY(_ i: Int) -> CGFloat? {
+        let s = codeSymbols()
+        return i < s.count ? lineTop(s[i].line) : nil
+    }
+
+    public func outlineIndex(atY y: CGFloat) -> Int {
+        let s = codeSymbols(), line = lineAt(y: y)
+        var lo = 0, hi = s.count   // last symbol at or above `line`
+        while lo < hi {
+            let mid = (lo + hi) >> 1
+            if s[mid].line <= line { lo = mid + 1 } else { hi = mid }
+        }
+        return lo - 1
+    }
 
     /// Swaps in a complete text whose beginning matches the current one (the background half
     /// of progressive formatting). The caller relayouts the view.
@@ -63,6 +95,7 @@ public final class CodeContent: DocumentContent {
         text = t
         lines = l
         tokens = tk
+        symbols = nil
         size = CGSize(width: (padX * 2 + CGFloat(l.maxColumns) * typo.mono.advance).rounded(.up),
                       height: padY * 2 + CGFloat(l.count) * typo.lineHeight)
     }

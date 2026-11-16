@@ -55,6 +55,13 @@ public final class CLikeSpec: @unchecked Sendable {
     public var regexLiterals = false       // /re/ where an expression may start
     public var symbols = false             // :symbol (Ruby, Elixir)
 
+    // Code outline
+    /// Function definitions without a keyword (C, C++, Java, C#): `name(...) {` at brace depth
+    /// up to this value counts as a declaration. -1 = off.
+    public var keywordlessDefinitionDepth = -1
+    /// Go method receivers: `func (r *T) Name` declares `Name` (gofmt puts a space after func).
+    public var goReceivers = false
+
     public init(keywords: KeywordTable, _ configure: (CLikeSpec) -> Void = { _ in }) {
         self.keywords = keywords
         configure(self)
@@ -77,6 +84,11 @@ public enum CLike {
         var prev: UInt8 = newline       // last significant byte
         var prevKeyword = false
         var hint: UInt8 = 0
+        var hintAt = 0           // start of the keyword that set `hint` (outline titles)
+        var braces = 0           // { } depth outside strings/comments
+        var parens = 0
+        var receiverBase = -1    // Go: paren depth at `func (`, then the name follows `)`
+        var receiverAt = 0
 
         while i < end {
             let b = p[i]
@@ -106,16 +118,29 @@ public enum CLike {
                     kind = TokenKind(rawValue: kw & KeywordTable.Hint.kindMask) ?? .keyword
                     newHint = kw & ~KeywordTable.Hint.kindMask
                     // `func (recv)` (Go): the parenthesis is not the declared name.
-                    if newHint == KeywordTable.Hint.declaresFunction && nextSignificant(p, i, end) == 0x28 { newHint = 0 }
+                    if newHint == KeywordTable.Hint.declaresFunction && nextSignificant(p, i, end) == 0x28 {
+                        newHint = 0
+                        if s.goReceivers && i < end && p[i] == 0x20 { receiverBase = parens; receiverAt = st }
+                    }
+                    if st > 0 && p[st - 1] == 0x3A { newHint = 0 }   // `Foo::class` refers to a class, doesn't declare one
+                    if newHint != 0 { hintAt = st }
                 } else if hint == KeywordTable.Hint.declaresFunction {
                     kind = .function
+                    out.addSymbol(st, i, .function, titleStart: hintAt)
                 } else if hint == KeywordTable.Hint.declaresType {
                     kind = .type
+                    // C family: `struct stat st;` uses a type; only `struct foo {` defines one.
+                    if s.keywordlessDefinitionDepth < 0 || opensBody(p, i, end) {
+                        out.addSymbol(st, i, .type, titleStart: hintAt)
+                    }
                 } else if s.macroBang && i < end && p[i] == 0x21 && p[i + 1] != 0x3D {
                     i &+= 1
                     kind = .preprocessor
                 } else if nextSignificant(p, i, end) == 0x28 {
                     kind = .function
+                    if braces <= s.keywordlessDefinitionDepth && isDefinition(p, st, i, end) {
+                        out.addSymbol(st, i, .function, titleStart: st)
+                    }
                 } else if prev == 0x2E && (st < 2 || p[st - 2] != 0x2E) {
                     kind = .property
                 } else if s.capitalizedTypes && c & ByteClass.upper != 0 {
@@ -146,6 +171,13 @@ public enum CLike {
             else if b == closer {
                 if depth == 0 { return i }
                 depth &-= 1
+            }
+            switch b {   // outline bookkeeping (strings and comments never get here)
+            case 0x7B: braces &+= 1
+            case 0x7D: braces = max(0, braces &- 1)
+            case 0x28: parens &+= 1
+            case 0x29: parens = max(0, parens &- 1)
+            default: break
             }
 
             var j = i &+ 1           // default: single punctuation byte, left plain
@@ -300,6 +332,11 @@ public enum CLike {
                 prev = p[j - 1]
                 prevKeyword = false
                 hint = b == 0x3C || b == 0x2C ? hint : 0   // keep hint across generics `class Foo<`
+                if b == 0x29 && receiverBase >= 0 && parens <= receiverBase {
+                    hint = KeywordTable.Hint.declaresFunction   // Go: `func (r *T)` -> the method name is next
+                    hintAt = receiverAt
+                    receiverBase = -1
+                }
             }
             i = j
         }
@@ -307,6 +344,52 @@ public enum CLike {
     }
 
     // MARK: - Pieces
+
+    /// `name(...)` at [st, i) is a definition when the matching `)` is followed (after
+    /// qualifiers like `const`, `override`, `throws X`) by `{`, and `name` isn't after `new`.
+    static func isDefinition(_ p: UnsafePointer<UInt8>, _ st: Int, _ i: Int, _ end: Int) -> Bool {
+        var b = st - 1
+        while b >= 0 && (p[b] == 0x20 || p[b] == 0x09) { b -= 1 }
+        if b >= 2 && p[b] == 0x77 && p[b - 1] == 0x65 && p[b - 2] == 0x6E && (b < 3 || !isIdentByte(p[b - 3])) { return false }   // new X(
+        var k = i
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        guard k < end, p[k] == 0x28 else { return false }
+        var depth = 0
+        let limit = min(end, k + 4096)
+        while k < limit {
+            let c = p[k]
+            if c == 0x28 { depth += 1 } else if c == 0x29 { depth -= 1; if depth == 0 { break } }
+            else if c == 0x7B || c == 0x7D || c == 0x3B { return false }
+            k += 1
+        }
+        guard k < limit else { return false }
+        k += 1
+        while k < limit {
+            let c = p[k]
+            if c == 0x7B { return true }
+            if c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D || c == 0x2C || c == 0x2E || isIdentByte(c) { k += 1; continue }
+            return false
+        }
+        return false
+    }
+
+    /// A `{` comes before any `;`, `=`, `(` or `)` (within 512 bytes): the type has a body.
+    static func opensBody(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Bool {
+        var k = i
+        let limit = min(end, i + 512)
+        while k < limit {
+            switch p[k] {
+            case 0x7B: return true
+            case 0x3B, 0x3D, 0x28, 0x29: return false
+            default: k += 1
+            }
+        }
+        return false
+    }
+
+    @inline(__always) static func isIdentByte(_ c: UInt8) -> Bool {
+        (c >= 0x61 && c <= 0x7A) || (c >= 0x41 && c <= 0x5A) || (c >= 0x30 && c <= 0x39) || c == 0x5F
+    }
 
     /// True if only spaces/tabs precede `i` on its line (within the lexed range).
     static func atLineStart(_ p: UnsafePointer<UInt8>, _ start: Int, _ i: Int) -> Bool {
