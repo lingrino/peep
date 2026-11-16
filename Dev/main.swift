@@ -396,6 +396,37 @@ func firstPaint(_ args: [String]) {
     }
 }
 
+/// Find timings: raw `Search.find` and the full preview path (matches + highlight + reveal),
+/// best of 5 per query. Typing in the find bar runs the full path once per keystroke.
+@MainActor
+func findBench(_ args: [String]) {
+    let size = NSSize(width: 980, height: 800)
+    let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+    let view = PreviewView(frame: NSRect(origin: .zero, size: size))
+    window.contentView = view
+    let doc = Document.open(path: args[0])
+    view.show(doc)
+    (doc.content as? MarkdownContent)?.finishLayout()
+    let text = doc.content.text
+    print("\((args[0] as NSString).lastPathComponent): \(text.count) bytes")
+    for q in args.dropFirst() {
+        let qb = Array(q.utf8)
+        var raw = UInt64.max, full = UInt64.max
+        var n = 0
+        for _ in 0..<5 {
+            var t = nanotime()
+            n = Search.find(text, qb, caseSensitive: Search.isCaseSensitive(qb)).count
+            raw = min(raw, nanotime() - t)
+            t = nanotime()
+            _ = view.find(q)
+            full = min(full, nanotime() - t)
+            view.clearFind()
+        }
+        print(String(format: "  %-12@ %8d matches  search %7.2fms (%5.1f GB/s)  full %7.2fms", "\"\(q)\"" as NSString, n,
+                     Double(raw) / 1e6, Double(text.count) / Double(raw), Double(full) / 1e6))
+    }
+}
+
 /// Boxes whose line baselines fall outside their rect, or that overlap the next block.
 @MainActor
 func mdGeometryErrors(_ md: MarkdownContent) -> [String] {
@@ -435,6 +466,7 @@ MainActor.assumeIsolated {
     case "types": types(Array(args.dropFirst()))
     case "smoke": smoke(Array(args.dropFirst()))
     case "firstpaint": firstPaint(Array(args.dropFirst()))
+    case "findbench": findBench(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
     case "parsebench": parsebench(Array(args.dropFirst()))
     case "icon": icon(Array(args.dropFirst()))

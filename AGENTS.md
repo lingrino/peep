@@ -73,6 +73,7 @@ Scripts/dev.sh layout <file.md> [w]   # markdown block/box dump (+ geometry self
 Scripts/dev.sh firstpaint <files...>  # main-thread cost to first frame: open/show/layout/draw
 Scripts/dev.sh smoke <dirs/files...>  # open+draw+scroll+find every file; crashes, geometry, slowest
 Scripts/dev.sh parsebench <file.md> [N]   # markdown parse throughput
+Scripts/dev.sh findbench <file> <query...>  # raw search vs full find path per query
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
