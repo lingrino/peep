@@ -108,6 +108,11 @@ let markdownTests: [Test] = [
             "L1•P|a", "L1•tP|b", "L2•tP|c", "L11.P|one", "L12.tP|two", "L1[ ]P|todo", "L1[x]tP|done",
         ])
     },
+    Test("md: empty task items") {
+        // A bare "[ ]" after the marker used to strip 4 bytes from a 3-byte line (a negative
+        // range: crashed the previewer).
+        expectMD("- [ ]\n- [x]\n-  [ ]", ["L1[ ]P|", "L1[x]tP|", "L1[ ]tP|"])
+    },
     Test("md: deep nesting uses relative indents") {
         expectMD("- a\n  - b\n    - c\n      - d\n- e", ["L1•P|a", "L2•tP|b", "L3•tP|c", "L4•tP|d", "L1•tP|e"])
         expectMD("1. a\n   1. b\n      - c", ["L11.P|a", "L21.tP|b", "L3•tP|c"])

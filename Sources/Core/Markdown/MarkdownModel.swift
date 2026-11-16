@@ -7,15 +7,56 @@ public final class MarkdownDocument: @unchecked Sendable {
     public var text: TextBuffer
     public var blocks: [MDBlock] = []
     public var runs: [MDRun] = []
-    public var links: [String] = []
-    public var images: [MDImage] = []
+    /// Link destinations, indexed by `MDRun.ref` of link runs.
+    public var links: MDLinks
+    /// Images, indexed by `MDRun.ref` of image runs.
+    public var images: MDImages
     public var tables: [MDTable] = []
     public var headings: [MDHeading] = []
 
-    init(text: TextBuffer) { self.text = text }
+    init(text: TextBuffer, strings: TextBuffer, links: [StrRange], images: [MDImageSpec]) {
+        self.text = text
+        self.links = MDLinks(store: strings, ranges: links)
+        self.images = MDImages(store: strings, specs: images)
+    }
 }
 
-public enum MDBlockKind: UInt8, Sendable {
+/// Link destinations stay bytes in one shared store until the renderer asks for one (a click):
+/// a `String` per link was a quarter of the parse time of a link-list README.
+public struct MDLinks: RandomAccessCollection, Sendable {
+    let store: TextBuffer
+    let ranges: [StrRange]
+    public var startIndex: Int { 0 }
+    public var endIndex: Int { ranges.count }
+    public subscript(i: Int) -> String { store.string(Int(ranges[i].start), Int(ranges[i].end)) }
+}
+
+/// Images as ranges in the string store; `MDImage` values (with Strings) are made on access.
+public struct MDImages: RandomAccessCollection, Sendable {
+    let store: TextBuffer
+    let specs: [MDImageSpec]
+    public var startIndex: Int { 0 }
+    public var endIndex: Int { specs.count }
+    public subscript(i: Int) -> MDImage {
+        let s = specs[i]
+        var m = MDImage(url: store.string(Int(s.url.start), Int(s.url.end)),
+                        alt: store.string(Int(s.alt.start), Int(s.alt.end)))
+        m.width = s.width
+        m.height = s.height
+        if !s.dark.isNone { m.darkURL = store.string(Int(s.dark.start), Int(s.dark.end)) }
+        return m
+    }
+}
+
+struct MDImageSpec: BitwiseCopyable {
+    var url: StrRange
+    var alt: StrRange
+    var dark = StrRange.none
+    var width: Float = 0
+    var height: Float = 0
+}
+
+public enum MDBlockKind: UInt8, Sendable, BitwiseCopyable {
     case paragraph
     case heading      // level in `level`
     case code         // fenced/indented; `language` set for fenced with info string
@@ -47,14 +88,14 @@ public struct MDBlock: Sendable {
     public var heading: Int32 = -1
 }
 
-public enum MDMarker: UInt8, Sendable {
+public enum MDMarker: UInt8, Sendable, BitwiseCopyable {
     case none, bullet, ordered, taskOpen, taskDone
 }
 
-public enum MDAlign: UInt8, Sendable { case left, center, right }
+public enum MDAlign: UInt8, Sendable, BitwiseCopyable { case left, center, right }
 
 /// Inline style bits.
-public struct MDStyle: OptionSet, Sendable {
+public struct MDStyle: OptionSet, Sendable, BitwiseCopyable {
     public let rawValue: UInt16
     public init(rawValue: UInt16) { self.rawValue = rawValue }
     public static let emphasis = MDStyle(rawValue: 1)
@@ -70,7 +111,7 @@ public struct MDStyle: OptionSet, Sendable {
 }
 
 /// A styled span of rendered text. Unstyled text has no run.
-public struct MDRun: Sendable {
+public struct MDRun: Sendable, BitwiseCopyable {
     public var start: Int32
     public var end: Int32
     public var style: MDStyle

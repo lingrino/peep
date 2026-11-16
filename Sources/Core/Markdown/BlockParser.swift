@@ -1,72 +1,86 @@
 // CommonMark + GFM block structure.
 //
 // Pass 1 (this file) walks lines once, maintaining a stack of open containers (block quotes
-// and list items) and at most one open leaf block. Closed leaves become `PendingBlock`s
-// holding the source line ranges of their content. Pass 2 (InlineParser) turns pending
-// blocks into rendered text + style runs, after all link reference definitions are known.
+// and list items) and at most one open leaf block. The open leaf's content lines are always
+// the tail of `lines` (only one leaf is open at a time), so closing a leaf records a range
+// instead of copying. Closed leaves become `PendingBlock`s. Pass 2 (InlineParser) turns
+// pending blocks into rendered text + style runs, after all link reference definitions are
+// known.
 
-struct PendingBlock {
+struct PendingBlock: BitwiseCopyable {
     var kind: MDBlockKind
     var level: UInt8 = 0
     var quoteDepth: UInt8 = 0
     var listDepth: UInt8 = 0
     var marker: MDMarker = .none
+    var firstInItem = false
     var markerNumber: Int32 = 0
     var list: Int32 = -1                 // innermost enclosing list (for tight/loose)
-    var firstInItem = false
-    var lineStart: Int32 = 0             // range in BlockParser.lines (pairs of offsets)
+    var lineStart: Int32 = 0             // first line (index of a pair in BlockParser.lines)
     var lineCount: Int32 = 0
-    var info: (Int32, Int32) = (0, 0)    // fenced code info string
-    var aligns: [MDAlign] = []           // tables
+    var infoStart: Int32 = 0             // fenced code info string (source offsets)
+    var infoEnd: Int32 = 0
+    var alignStart: Int32 = 0            // tables: range in BlockParser.aligns
+    var alignCount: Int32 = 0
 }
 
-struct ListInfo {
+struct ListInfo: BitwiseCopyable {
     var loose = false
-    var firstBlock = 0
-    var lastBlock = 0
+    var firstBlock: Int32 = 0
+    var lastBlock: Int32 = 0
     var parent: Int32 = -1           // list of the enclosing item, if nested
 }
 
 final class BlockParser {
     let p: UnsafePointer<UInt8>
     let n: Int
+    /// Owns the string store and reference table that definitions are added to.
+    unowned let inline: InlineParser
 
-    enum ContainerKind { case quote, item }
-    struct Container {
+    enum ContainerKind: UInt8, BitwiseCopyable { case quote, item }
+    struct Container: BitwiseCopyable {
         var kind: ContainerKind
-        var indent = 0               // item: columns required to continue
         var ordered = false
+        var emitted = false          // first leaf of the item has been emitted
+        var started = false          // item has had content
+        var task: MDMarker = .none
         var bullet: UInt8 = 0        // '-', '+', '*' or '.'/')' for ordered
+        var indent = 0               // item: columns required to continue
         var number: Int32 = 0
         var list: Int32 = -1         // index into `lists`
-        var emitted = false          // first leaf of the item has been emitted
-        var task: MDMarker = .none
-        var blankAfterContent = false
-        var started = false          // item has had content
     }
 
-    enum Leaf { case none, paragraph, fenced, indented, html, table }
+    enum Leaf: UInt8 { case none, paragraph, fenced, indented, html, table }
 
-    var stack: [Container] = []
+    var stack = RawArray<Container>(capacity: 16)
     var leaf = Leaf.none
-    var leafLines: [Int32] = []      // pairs (start, end) for the open leaf
+    /// Index in `lines` (Int32 units) where the open leaf's lines start.
+    var leafFirst = 0
     var fenceChar: UInt8 = 0
     var fenceLen = 0
     var fenceIndent = 0
     var fenceInfo: (Int32, Int32) = (0, 0)
     var htmlEnd = 0                  // HTML block end condition (1...7)
-    var tableAligns: [MDAlign] = []
+    var tableAlignStart = 0
 
-    var blocks: [PendingBlock] = []
-    var lines: [Int32] = []          // all leaf content lines, pairs (start, end)
-    var lists: [ListInfo] = []
-    var refs: [String: (String, String)] = [:]
-    var footnoteLabels: [String] = []
+    var blocks: RawArray<PendingBlock>
+    var lines: RawArray<Int32>       // leaf content lines, pairs (start, end)
+    var lists = RawArray<ListInfo>(capacity: 16)
+    var aligns = RawArray<MDAlign>(capacity: 16)
     var lastLineBlank = false
+    var pendingBlankItems = false
 
-    init(_ p: UnsafePointer<UInt8>, _ n: Int) {
+    init(_ p: UnsafePointer<UInt8>, _ n: Int, _ inline: InlineParser) {
         self.p = p
         self.n = n
+        self.inline = inline
+        // ~1 block per 70 bytes and a line per 40 in typical documents; growth is cheap anyway.
+        blocks = RawArray(capacity: n / 64 + 16)
+        lines = RawArray(capacity: n / 16 + 32)
+    }
+
+    deinit {
+        stack.free(); blocks.free(); lines.free(); lists.free(); aligns.free()
     }
 
     // MARK: - Driver
@@ -74,10 +88,8 @@ final class BlockParser {
     func run() {
         var i = skipFrontMatter()
         while i < n {
-            var e = i
             let le = lineEnd(p, i, n)
-            e = le
-            var ce = e
+            var ce = le
             if ce > i && p[ce - 1] == 0x0D { ce -= 1 }
             processLine(i, ce)
             i = le + 1
@@ -114,7 +126,8 @@ final class BlockParser {
         var c = col
         var j = pos
         while j < end {
-            if p[j] == 0x20 { c += 1 } else if p[j] == 0x09 { c += 4 - c % 4 } else { break }
+            let b = p[j]
+            if b == 0x20 { c += 1 } else if b == 0x09 { c += 4 - c % 4 } else { break }
             j += 1
         }
         return (c - col, j)
@@ -147,7 +160,8 @@ final class BlockParser {
         let blank = isBlank(ls, le)
 
         // 1. Continue open containers.
-        while matched < stack.count {
+        let depth = stack.count
+        while matched < depth {
             let c = stack[matched]
             if c.kind == .quote {
                 let (ind, at) = indentation(pos, le, col: col)
@@ -175,7 +189,7 @@ final class BlockParser {
                 }
             }
         }
-        let allMatched = matched == stack.count
+        let allMatched = matched == depth
 
         // 2. Inside a fenced code block / HTML block: content or end.
         if allMatched && leaf == .fenced {
@@ -219,15 +233,15 @@ final class BlockParser {
                 }
                 continue
             }
-            if var item = listMarker(at, le, col: col + ind, interruptsParagraph: leaf == .paragraph && allMatched && !opened) {
+            // Only bullets and digits can start an item: skip the call for everything else.
+            if b == 0x2D || b == 0x2B || b == 0x2A || (b >= 0x30 && b <= 0x39),
+               var item = listMarker(at, le, col: col + ind, interruptsParagraph: leaf == .paragraph && allMatched && !opened) {
                 // Continuation indent is relative to where this container's prefix starts.
                 item.indent -= col
                 // A thematic break that looks like a bullet (`- - -`) is a break.
                 if isThematicBreak(at, le) { break }
                 if !opened { closeUnmatched(matched); opened = true }
                 closeLeaf()
-                // Same list continues if the innermost container is an item of a compatible list
-                // at this level: handled by `openItem`.
                 openItem(item)
                 matched = stack.count
                 pos = item.contentPos
@@ -278,11 +292,14 @@ final class BlockParser {
 
     // MARK: - Leaf blocks
 
+    /// Lines of the open leaf.
+    @inline(__always) var leafLineCount: Int { (lines.count - leafFirst) >> 1 }
+
     func leafLine(_ pos: Int, _ le: Int, col: Int, blank: Bool) {
         if blank {
             if leaf == .paragraph || leaf == .table { closeLeaf() }
             else if leaf == .indented { addLine(pos, pos) }   // trailing blanks trimmed at close
-            markBlankInItems()
+            pendingBlankItems = true
             return
         }
         let (ind, at) = indentation(pos, le, col: col)
@@ -294,16 +311,17 @@ final class BlockParser {
             return
         }
         if leaf == .indented { closeLeaf() }
+        let b = p[at]
 
         // Setext underline / GFM table delimiter row turn the open paragraph into something else.
         if leaf == .paragraph {
-            if let lvl = setextLevel(at, le) {
+            if (b == 0x3D || b == 0x2D), let lvl = setextLevel(at, le) {
                 emitLeaf(.heading, level: UInt8(lvl))
                 return
             }
-            if leafLines.count == 2, isDelimiterCandidate(at, le), let aligns = tableDelimiter(at, le, headerCells: cellCount(Int(leafLines[0]), Int(leafLines[1]))) {
+            if leafLineCount == 1, isDelimiterCandidate(at, le),
+               tableDelimiter(at, le, headerCells: cellCount(Int(lines[leafFirst]), Int(lines[leafFirst + 1]))) {
                 leaf = .table
-                tableAligns = aligns
                 return
             }
         }
@@ -311,50 +329,55 @@ final class BlockParser {
             if startsBlock(at, le, col: col + ind) { closeLeaf() } else { addLine(at, le); return }
         }
 
-        if isThematicBreak(at, le) {
-            closeLeaf()
-            startLeaf(.paragraph)
-            emitLeaf(.rule)
-            itemStarted()
-            return
-        }
-        let lvl = atxLevel(at, le)
-        if lvl > 0 {
-            closeLeaf()
-            startLeaf(.paragraph)
-            var s = at + lvl
-            while s < le && (p[s] == 0x20 || p[s] == 0x09) { s += 1 }
-            var e = le
-            while e > s && (p[e - 1] == 0x20 || p[e - 1] == 0x09) { e -= 1 }
-            // Optional closing sequence of #s (preceded by a space).
-            var h = e
-            while h > s && p[h - 1] == 0x23 { h -= 1 }
-            if h == s || p[h - 1] == 0x20 || p[h - 1] == 0x09 {
-                e = h
-                while e > s && (p[e - 1] == 0x20 || p[e - 1] == 0x09) { e -= 1 }
+        // Only these bytes can start a non-paragraph leaf: most lines skip every recognizer.
+        switch b {
+        case 0x2A, 0x2D, 0x5F:   // * - _
+            if isThematicBreak(at, le) {
+                closeLeaf()
+                startLeaf(.paragraph)
+                emitLeaf(.rule)
+                itemStarted()
+                return
             }
-            addLine(s, e)
-            emitLeaf(.heading, level: UInt8(lvl))
-            itemStarted()
-            return
-        }
-        if isOpeningFence(at, le) {
-            closeLeaf()
-            startLeaf(.fenced)
-            fenceChar = p[at]
-            var k = at
-            while k < le && p[k] == fenceChar { k += 1 }
-            fenceLen = k - at
-            fenceIndent = ind
-            var s = k
-            while s < le && (p[s] == 0x20 || p[s] == 0x09) { s += 1 }
-            var e = le
-            while e > s && (p[e - 1] == 0x20 || p[e - 1] == 0x09) { e -= 1 }
-            fenceInfo = (Int32(s), Int32(e))
-            itemStarted()
-            return
-        }
-        if p[at] == 0x3C {
+        case 0x23:   // #
+            let lvl = atxLevel(at, le)
+            if lvl > 0 {
+                closeLeaf()
+                startLeaf(.paragraph)
+                var s = at + lvl
+                while s < le && (p[s] == 0x20 || p[s] == 0x09) { s += 1 }
+                var e = le
+                while e > s && (p[e - 1] == 0x20 || p[e - 1] == 0x09) { e -= 1 }
+                // Optional closing sequence of #s (preceded by a space).
+                var h = e
+                while h > s && p[h - 1] == 0x23 { h -= 1 }
+                if h == s || p[h - 1] == 0x20 || p[h - 1] == 0x09 {
+                    e = h
+                    while e > s && (p[e - 1] == 0x20 || p[e - 1] == 0x09) { e -= 1 }
+                }
+                addLine(s, e)
+                emitLeaf(.heading, level: UInt8(lvl))
+                itemStarted()
+                return
+            }
+        case 0x60, 0x7E:   // ` ~
+            if isOpeningFence(at, le) {
+                closeLeaf()
+                startLeaf(.fenced)
+                fenceChar = b
+                var k = at
+                while k < le && p[k] == fenceChar { k += 1 }
+                fenceLen = k - at
+                fenceIndent = ind
+                var s = k
+                while s < le && (p[s] == 0x20 || p[s] == 0x09) { s += 1 }
+                var e = le
+                while e > s && (p[e - 1] == 0x20 || p[e - 1] == 0x09) { e -= 1 }
+                fenceInfo = (Int32(s), Int32(e))
+                itemStarted()
+                return
+            }
+        case 0x3C:   // <
             let kind = htmlStart(at, le, interrupting: leaf == .paragraph)
             if kind > 0 {
                 closeLeaf()
@@ -365,6 +388,8 @@ final class BlockParser {
                 itemStarted()
                 return
             }
+        default:
+            break
         }
         // Paragraph text.
         if leaf != .paragraph { closeLeaf(); startLeaf(.paragraph) }
@@ -372,14 +397,14 @@ final class BlockParser {
         itemStarted()
     }
 
-    func startLeaf(_ l: Leaf) {
+    @inline(__always) func startLeaf(_ l: Leaf) {
         leaf = l
-        leafLines.removeAll(keepingCapacity: true)
+        leafFirst = lines.count
     }
 
     @inline(__always) func addLine(_ s: Int, _ e: Int) {
-        leafLines.append(Int32(s))
-        leafLines.append(Int32(e))
+        lines.append(Int32(truncatingIfNeeded: s))
+        lines.append(Int32(truncatingIfNeeded: e))
     }
 
     func closeLeaf() {
@@ -387,11 +412,11 @@ final class BlockParser {
         case .none: return
         case .paragraph:
             stripReferenceDefinitions()
-            if !leafLines.isEmpty { emitLeaf(.paragraph) } else { leaf = .none }
+            if leafLineCount > 0 { emitLeaf(.paragraph) } else { leaf = .none }
         case .fenced: emitLeaf(.code)
         case .indented:
-            while leafLines.count >= 2 && isBlank(Int(leafLines[leafLines.count - 2]), Int(leafLines[leafLines.count - 1])) {
-                leafLines.removeLast(2)
+            while leafLineCount > 0 && isBlank(Int(lines[lines.count - 2]), Int(lines[lines.count - 1])) {
+                lines.removeLast(2)
             }
             emitLeaf(.code)
         case .html: emitLeaf(.html)
@@ -402,34 +427,40 @@ final class BlockParser {
     /// Records the open leaf as a pending block with its container context.
     func emitLeaf(_ kind: MDBlockKind, level: UInt8 = 0) {
         var b = PendingBlock(kind: kind, level: level)
-        b.lineStart = Int32(lines.count / 2)
-        b.lineCount = Int32(leafLines.count / 2)
-        lines.append(contentsOf: leafLines)
-        if kind == .code && leaf == .fenced { b.info = fenceInfo }
-        if kind == .table { b.aligns = tableAligns }
+        b.lineStart = Int32(leafFirst >> 1)
+        b.lineCount = Int32(leafLineCount)
+        if kind == .code && leaf == .fenced { b.infoStart = fenceInfo.0; b.infoEnd = fenceInfo.1 }
+        if kind == .table {
+            b.alignStart = Int32(tableAlignStart)
+            b.alignCount = Int32(aligns.count - tableAlignStart)
+        }
         var q: UInt8 = 0, l: UInt8 = 0
-        for c in stack { if c.kind == .quote { q += 1 } else { l += 1 } }
+        var item = -1
+        for k in 0..<stack.count {
+            if stack[k].kind == .quote { q += 1 } else { l += 1; item = k }
+        }
         b.quoteDepth = q
         b.listDepth = l
-        if let k = stack.lastIndex(where: { $0.kind == .item }) {
-            b.list = stack[k].list
-            if !stack[k].emitted {
-                stack[k].emitted = true
+        if item >= 0 {
+            b.list = stack[item].list
+            if !stack[item].emitted {
+                stack[item].emitted = true
                 b.firstInItem = true
-                b.marker = stack[k].task != .none ? stack[k].task : (stack[k].ordered ? .ordered : .bullet)
-                b.markerNumber = stack[k].number
-                // Task marker `[ ] ` is stripped from the item's first paragraph.
-                if stack[k].task != .none && kind == .paragraph && b.lineCount > 0 {
+                b.marker = stack[item].task != .none ? stack[item].task : (stack[item].ordered ? .ordered : .bullet)
+                b.markerNumber = stack[item].number
+                // Task marker `[ ] ` is stripped from the item's first paragraph. (A bare
+                // "- [ ]" line leaves an empty line, not a negative range.)
+                if stack[item].task != .none && kind == .paragraph && b.lineCount > 0 {
                     let li = Int(b.lineStart) * 2
-                    lines[li] += 4
+                    lines[li] = min(lines[li] + 4, lines[li + 1])
                     while lines[li] < lines[li + 1] && (p[Int(lines[li])] == 0x20 || p[Int(lines[li])] == 0x09) { lines[li] += 1 }
                 }
             }
-            lists[Int(b.list)].lastBlock = blocks.count
+            lists[Int(b.list)].lastBlock = Int32(blocks.count)
         }
         blocks.append(b)
         leaf = .none
-        leafLines.removeAll(keepingCapacity: true)
+        leafFirst = lines.count
     }
 
     // MARK: - Containers
@@ -457,7 +488,7 @@ final class BlockParser {
             k += 1
         } else if b >= 0x30 && b <= 0x39 {
             var digits = 0
-            while k < le && p[k] >= 0x30 && p[k] <= 0x39 && digits < 10 { number = number * 10 + Int32(p[k] - 0x30); k += 1; digits += 1 }
+            while k < le && p[k] >= 0x30 && p[k] <= 0x39 && digits < 10 { number = number &* 10 &+ Int32(p[k] - 0x30); k += 1; digits += 1 }
             if digits > 9 || k >= le || (p[k] != 0x2E && p[k] != 0x29) { return nil }
             bullet = p[k]
             ordered = true
@@ -500,73 +531,71 @@ final class BlockParser {
         // Continue the list if the previous sibling item (just closed or still innermost)
         // belongs to a compatible list.
         var list: Int32 = -1
-        if let last = lastClosedItem, last.depth == stack.count, last.bullet == s.bullet, last.ordered == s.ordered {
-            list = last.list
-            if lastLineBlankBeforeItem { lists[Int(list)].loose = true }
+        if hasLastClosed, lastClosed.depth == stack.count, lastClosed.bullet == s.bullet, lastClosed.ordered == s.ordered {
+            list = lastClosed.list
+            if lastLineBlank { lists[Int(list)].loose = true }
         }
         if list < 0 {
-            let parent = stack.last(where: { $0.kind == .item })?.list ?? -1
-            lists.append(ListInfo(firstBlock: blocks.count, lastBlock: blocks.count, parent: parent))
+            var parent: Int32 = -1
+            var k = stack.count - 1
+            while k >= 0 { if stack[k].kind == .item { parent = stack[k].list; break }; k -= 1 }
+            lists.append(ListInfo(firstBlock: Int32(blocks.count), lastBlock: Int32(blocks.count), parent: parent))
             list = Int32(lists.count - 1)
         }
         var number = s.number
-        if s.ordered, let last = lastClosedItem, last.list == list { number = last.number + 1 }
-        stack.append(Container(kind: .item, indent: s.indent, ordered: s.ordered, bullet: s.bullet, number: number,
-                               list: list, task: s.task, started: !s.blankStart))
-        lastClosedItem = nil
+        if s.ordered, hasLastClosed, lastClosed.list == list { number = lastClosed.number &+ 1 }
+        stack.append(Container(kind: .item, ordered: s.ordered, started: !s.blankStart, task: s.task,
+                               bullet: s.bullet, indent: s.indent, number: number, list: list))
+        hasLastClosed = false
     }
 
     struct ClosedItem { var depth: Int; var bullet: UInt8; var ordered: Bool; var list: Int32; var number: Int32 }
-    var lastClosedItem: ClosedItem?
-    var lastLineBlankBeforeItem: Bool { lastLineBlank }
+    var lastClosed = ClosedItem(depth: 0, bullet: 0, ordered: false, list: -1, number: 0)
+    var hasLastClosed = false
 
     func closeContainer() {
         closeLeaf()
-        guard let c = stack.popLast() else { return }
+        guard !stack.isEmpty else { return }
+        let c = stack.last
+        stack.removeLast()
         if c.kind == .item {
-            lastClosedItem = ClosedItem(depth: stack.count, bullet: c.bullet, ordered: c.ordered, list: c.list, number: c.number)
+            lastClosed = ClosedItem(depth: stack.count, bullet: c.bullet, ordered: c.ordered, list: c.list, number: c.number)
+            hasLastClosed = true
             if !c.emitted {
                 // Empty item: still draw its marker.
                 var b = PendingBlock(kind: .paragraph)
-                b.lineStart = Int32(lines.count / 2)
+                b.lineStart = Int32(lines.count >> 1)
                 b.lineCount = 0
                 var q: UInt8 = 0, l: UInt8 = 0
-                for k in stack { if k.kind == .quote { q += 1 } else { l += 1 } }
+                for k in 0..<stack.count { if stack[k].kind == .quote { q += 1 } else { l += 1 } }
                 b.quoteDepth = q
                 b.listDepth = l + 1
                 b.list = c.list
                 b.firstInItem = true
                 b.marker = c.task != .none ? c.task : (c.ordered ? .ordered : .bullet)
                 b.markerNumber = c.number
-                lists[Int(c.list)].lastBlock = blocks.count
+                lists[Int(c.list)].lastBlock = Int32(blocks.count)
                 blocks.append(b)
             }
         } else {
-            lastClosedItem = nil
+            hasLastClosed = false
         }
     }
 
-    /// A blank line inside an item followed by more content makes the list loose.
-    func markBlankInItems() {
-        for k in stack.indices where stack[k].kind == .item && stack[k].started {
-            stack[k].blankAfterContent = true
-        }
-        // Only the innermost item's blank matters if more content follows in it; the flag is
-        // reset by `itemStarted` when content resumes in the same item... see below.
-        pendingBlankItems = true
-    }
-
-    var pendingBlankItems = false
-
-    func itemStarted() {
-        if let k = stack.lastIndex(where: { $0.kind == .item }) {
-            if pendingBlankItems && stack[k].started && stack[k].emitted {
-                lists[Int(stack[k].list)].loose = true
+    /// Content in an item after a blank line inside it makes the list loose.
+    @inline(__always) func itemStarted() {
+        var k = stack.count - 1
+        while k >= 0 {
+            if stack[k].kind == .item {
+                if pendingBlankItems && stack[k].started && stack[k].emitted {
+                    lists[Int(stack[k].list)].loose = true
+                }
+                stack[k].started = true
+                break
             }
-            stack[k].started = true
+            k -= 1
         }
         pendingBlankItems = false
-        for k in stack.indices where stack[k].kind == .item { stack[k].blankAfterContent = false }
     }
 
     // MARK: - Block recognizers
@@ -619,77 +648,103 @@ final class BlockParser {
 
     /// HTML block start condition (CommonMark 4.6), 0 if none.
     func htmlStart(_ at: Int, _ le: Int, interrupting: Bool) -> Int {
-        func lowerMatch(_ s: StaticString, _ i: Int) -> Bool {
-            let q = s.utf8Start
-            let len = s.utf8CodeUnitCount
-            if i + len > le { return false }
-            for k in 0..<len where (p[i + k] | (p[i + k] >= 0x41 && p[i + k] <= 0x5A ? 0x20 : 0)) != q[k] { return false }
-            return true
+        @inline(__always) func tagEnds(_ i: Int) -> Bool {
+            i >= le || p[i] == 0x20 || p[i] == 0x09 || p[i] == 0x3E || (p[i] == 0x2F && i + 1 < le && p[i + 1] == 0x3E)
         }
-        func tagEnds(_ i: Int) -> Bool { i >= le || p[i] == 0x20 || p[i] == 0x09 || p[i] == 0x3E || (p[i] == 0x2F && i + 1 < le && p[i + 1] == 0x3E) }
+        @inline(__always) func isNameByte(_ c: UInt8) -> Bool {
+            ((c | 0x20) >= 0x61 && (c | 0x20) <= 0x7A) || (c >= 0x30 && c <= 0x39)
+        }
         let i = at + 1
-        for t: StaticString in ["script", "pre", "style", "textarea"] where lowerMatch(t, i) && tagEnds(i + t.utf8CodeUnitCount) { return 1 }
-        if lowerMatch("!--", i) { return 2 }
-        if i < le && p[i] == 0x3F { return 3 }
-        if i < le && p[i] == 0x21 && i + 1 < le && ((p[i + 1] | 0x20) >= 0x61 && (p[i + 1] | 0x20) <= 0x7A) { return 4 }
-        if lowerMatch("![cdata[", i) { return 5 }
-        let closing = i < le && p[i] == 0x2F
+        guard i < le else { return 0 }
+        let c = p[i]
+        if c == 0x21 {   // !
+            if i + 2 < le && p[i + 1] == 0x2D && p[i + 2] == 0x2D { return 2 }
+            if i + 1 < le && (p[i + 1] | 0x20) >= 0x61 && (p[i + 1] | 0x20) <= 0x7A { return 4 }
+            if i + 8 <= le && p[i + 1] == 0x5B && InlineParser.tagKey(p, i + 2, i + 7) == BlockParser.cdata && p[i + 7] == 0x5B { return 5 }
+            return 0
+        }
+        if c == 0x3F { return 3 }
+        let closing = c == 0x2F
         let ns = closing ? i + 1 : i
         var ne = ns
-        while ne < le && ((p[ne] | 0x20) >= 0x61 && (p[ne] | 0x20) <= 0x7A || (p[ne] >= 0x30 && p[ne] <= 0x39)) { ne += 1 }
-        if ne > ns && tagEnds(ne) {
-            let name = String(decoding: UnsafeBufferPointer(start: p + ns, count: ne - ns), as: UTF8.self).lowercased()
-            if BlockParser.blockTags.contains(name) { return 6 }
+        while ne < le && isNameByte(p[ne]) { ne += 1 }
+        if ne == ns { return 0 }
+        let key = InlineParser.tagKey(p, ns, ne)   // 0 when longer than 8 bytes
+        if !closing && (key == BlockParser.script || key == BlockParser.pre || key == BlockParser.style || key == BlockParser.textarea) && tagEnds(ne) {
+            return 1
         }
+        if tagEnds(ne) && BlockParser.isBlockTag(key, p, ns, ne) { return 6 }
         // Type 7: any complete open/close tag alone on the line (can't interrupt a paragraph).
-        if !interrupting && ne > ns {
-            var k = ne
-            if let e = InlineParser.htmlTagEnd(p, at, le) { k = e } else { return 0 }
-            if isBlank(k, le) { return 7 }
+        if !interrupting {
+            guard let e = InlineParser.htmlTagEnd(p, at, le) else { return 0 }
+            if isBlank(e, le) { return 7 }
         }
         return 0
     }
 
-    func htmlEnds(_ s: Int, _ le: Int) -> Bool {
-        let line = UnsafeBufferPointer(start: p + s, count: le - s)
-        func has(_ needle: String) -> Bool {
-            let nb = Array(needle.utf8)
-            if nb.count > line.count { return false }
-            outer: for k in 0...(line.count - nb.count) {
-                for j in 0..<nb.count {
-                    var c = line[k + j]
-                    if c >= 0x41 && c <= 0x5A { c |= 0x20 }
-                    if c != nb[j] { continue outer }
-                }
-                return true
-            }
-            return false
+    static let script = InlineParser.tagKey("script"), pre = InlineParser.tagKey("pre")
+    static let style = InlineParser.tagKey("style"), textarea = InlineParser.tagKey("textarea")
+    static let cdata = InlineParser.tagKey("cdata")
+
+    /// Type-6 tag names as packed keys (`InlineParser.tagKey`): integer compares instead of a
+    /// lowercased String per `<` line. The two names longer than 8 bytes are checked apart.
+    static let blockTagKeys: [UInt64] = ["address", "article", "aside", "base", "basefont", "body", "caption",
+        "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figure",
+        "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe",
+        "legend", "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
+        "search", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr", "track", "ul",
+        "picture", "source"].map { (s: StaticString) in InlineParser.tagKey(s) }
+
+    static func isBlockTag(_ key: UInt64, _ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int) -> Bool {
+        if key != 0 { return blockTagKeys.contains(key) }
+        if e - s != 10 { return false }
+        return lowerEquals(p + s, "blockquote") || lowerEquals(p + s, "figcaption")
+    }
+
+    /// ASCII case-insensitive compare of `p[0..<len]` with a lowercase literal.
+    static func lowerEquals(_ p: UnsafePointer<UInt8>, _ lit: StaticString) -> Bool {
+        let q = lit.utf8Start
+        for k in 0..<lit.utf8CodeUnitCount {
+            let c = p[k]
+            if (c >= 0x41 && c <= 0x5A ? c | 0x20 : c) != q[k] { return false }
         }
+        return true
+    }
+
+    /// Case-insensitive substring search of a lowercase literal in `p[s..<e]`.
+    func containsLower(_ s: Int, _ e: Int, _ needle: StaticString) -> Bool {
+        let len = needle.utf8CodeUnitCount
+        if e - s < len { return false }
+        let first = needle.utf8Start[0]
+        var k = s
+        while k + len <= e {
+            let c = p[k]
+            if (c >= 0x41 && c <= 0x5A ? c | 0x20 : c) == first && BlockParser.lowerEquals(p + k, needle) { return true }
+            k += 1
+        }
+        return false
+    }
+
+    func htmlEnds(_ s: Int, _ le: Int) -> Bool {
         switch htmlEnd {
-        case 1: return has("</script>") || has("</pre>") || has("</style>") || has("</textarea>")
-        case 2: return has("-->")
-        case 3: return has("?>")
-        case 4: return has(">")
-        case 5: return has("]]>")
+        case 1: return containsLower(s, le, "</script>") || containsLower(s, le, "</pre>")
+            || containsLower(s, le, "</style>") || containsLower(s, le, "</textarea>")
+        case 2: return containsLower(s, le, "-->")
+        case 3: return containsLower(s, le, "?>")
+        case 4: return containsLower(s, le, ">")
+        case 5: return containsLower(s, le, "]]>")
         default: return false
         }
     }
 
-    static let blockTags: Set<String> = ["address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
-        "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
-        "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe",
-        "legend", "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
-        "search", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr", "track", "ul", "picture", "source"]
-
     // MARK: - Tables (GFM)
 
     func cellCount(_ s: Int, _ e: Int) -> Int {
-        InlineParser.splitCells(p, s, e).count
+        inline.splitCells(p, s, e)
     }
 
-    /// Parses a delimiter row like `| :-- | :-: | --: |`. Requires the same column count as the header.
-    /// Only `|`, `-`, `:` and blanks, with a `-`. Cheap prefilter run on every paragraph's
-    /// second line, before splitting the header into cells (4% of parse time without it).
+    /// Delimiter row candidate: only `|`, `-`, `:` and blanks, with a `-`. Cheap prefilter run
+    /// on every paragraph's second line, before splitting the header into cells.
     @inline(__always) func isDelimiterCandidate(_ at: Int, _ le: Int) -> Bool {
         var dash = false
         for j in at..<le {
@@ -702,40 +757,43 @@ final class BlockParser {
         return dash
     }
 
-    func tableDelimiter(_ at: Int, _ le: Int, headerCells: Int) -> [MDAlign]? {
-        let cells = InlineParser.splitCells(p, at, le)
-        if cells.isEmpty || cells.count != headerCells { return nil }
+    /// Parses a delimiter row like `| :-- | :-: | --: |` into `aligns` (starting a new table's
+    /// range). Requires the same column count as the header.
+    func tableDelimiter(_ at: Int, _ le: Int, headerCells: Int) -> Bool {
+        let count = inline.splitCells(p, at, le)
+        if count == 0 || count != headerCells { return false }
         var hasPipe = false
         for j in at..<le where p[j] == 0x7C { hasPipe = true; break }
-        if !hasPipe && cells.count == 1 { return nil }   // a lone `---` is a setext/break
-        var aligns: [MDAlign] = []
-        for (s, e) in cells {
-            var a = s, b = e
+        if !hasPipe && count == 1 { return false }   // a lone `---` is a setext/break
+        let start = aligns.count
+        for c in 0..<count {
+            var a = Int(inline.cells[2 * c]), b = Int(inline.cells[2 * c + 1])
             while a < b && (p[a] == 0x20 || p[a] == 0x09) { a += 1 }
             while b > a && (p[b - 1] == 0x20 || p[b - 1] == 0x09) { b -= 1 }
-            if a == b { return nil }
+            if a == b { aligns.count = start; return false }
             let left = p[a] == 0x3A, right = p[b - 1] == 0x3A
             let ds = left ? a + 1 : a, de = right ? b - 1 : b
-            if de <= ds { return nil }
-            for k in ds..<de where p[k] != 0x2D { return nil }
+            if de <= ds { aligns.count = start; return false }
+            for k in ds..<de where p[k] != 0x2D { aligns.count = start; return false }
             aligns.append(left && right ? .center : right ? .right : .left)
         }
-        return aligns
+        tableAlignStart = start
+        return true
     }
 
     // MARK: - Link reference definitions
 
     /// Removes `[label]: destination "title"` definitions from the start of the open paragraph.
     func stripReferenceDefinitions() {
-        guard leafLines.count >= 2 else { return }
+        guard leafLineCount > 0 else { return }
         // A definition starts with "[" (after up to 3 spaces). Checking first matters:
-        // building the scratch copy for every paragraph was 22% of parse time.
-        var f = Int(leafLines[0])
-        let fe = Int(leafLines[1])
+        // building the joined copy for every paragraph was 22% of parse time.
+        var f = Int(lines[leafFirst])
+        let fe = Int(lines[leafFirst + 1])
         while f < fe && (p[f] == 0x20 || p[f] == 0x09) { f += 1 }
         if f >= fe || p[f] != 0x5B { return }
         // "[label]" must be followed by ":". When the label closes on the first line, check
-        // that before copying anything (link-list items like "[Foo](url)" start with "[").
+        // that before anything else (link-list items like "[Foo](url)" start with "[").
         var k = f + 1
         while k < fe {
             let c = p[k]
@@ -744,38 +802,27 @@ final class BlockParser {
             if c == 0x5D { if k + 1 >= fe || p[k + 1] != 0x3A { return }; break }
             k += 1
         }
-        // Join the lines (definitions may span lines) into one scratch copy, then parse
-        // consecutive definitions from a moving offset (one copy, not one per definition:
-        // changelogs end with hundreds of them).
-        var total = 0
-        for k in stride(from: 0, to: leafLines.count, by: 2) { total += Int(leafLines[k + 1] - leafLines[k]) + 1 }
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(total)
-        var lineEnds: [Int] = []
-        lineEnds.reserveCapacity(leafLines.count / 2)
-        if refs.isEmpty { refs.reserveCapacity(16) }
-        for k in stride(from: 0, to: leafLines.count, by: 2) {
-            let s = Int(leafLines[k]), e = Int(leafLines[k + 1])
-            bytes.append(contentsOf: UnsafeBufferPointer(start: p + s, count: e - s))
-            bytes.append(0x0A)
-            lineEnds.append(bytes.count)
-        }
+        // The lines joined with "\n" after each (straight from the source when they are
+        // contiguous there), then consecutive definitions parsed from a moving offset.
+        let count = leafLineCount
+        let (b, total) = inline.joinLines(p, lines.p + leafFirst, count, trailingNewline: true)
         var off = 0, li = 0, consumedLines = 0
-        bytes.withUnsafeBufferPointer { buf in
-            let b = buf.baseAddress!
-            while off < buf.count {
-                guard let (consumed, label, dest, title) = InlineParser.parseReferenceDefinition(b + off, buf.count - off) else { break }
-                // Must end at a line boundary.
-                let end = off + consumed
-                while li < lineEnds.count && lineEnds[li] < end { li += 1 }
-                guard li < lineEnds.count, lineEnds[li] == end else { break }
-                let key = InlineParser.normalizeLabel(label)
-                if refs[key] == nil { refs[key] = (dest, title) }
+        var lineEnd = Int(lines[leafFirst + 1] - lines[leafFirst]) + 1   // end of line `li` in the joined bytes
+        while off < total {
+            guard let d = InlineParser.parseReferenceDefinition(b + off, total - off) else { break }
+            // Must end at a line boundary.
+            let end = off + d.consumed
+            while li < count && lineEnd < end {
                 li += 1
-                consumedLines = li
-                off = end
+                if li < count { lineEnd += Int(lines[leafFirst + 2 * li + 1] - lines[leafFirst + 2 * li]) + 1 }
             }
+            guard li < count, lineEnd == end else { break }
+            inline.addReference(b + off, d)
+            li += 1
+            if li < count { lineEnd += Int(lines[leafFirst + 2 * li + 1] - lines[leafFirst + 2 * li]) + 1 }
+            consumedLines = li
+            off = end
         }
-        leafLines.removeFirst(consumedLines * 2)
+        leafFirst += consumedLines * 2
     }
 }

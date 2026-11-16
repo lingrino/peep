@@ -40,7 +40,7 @@ public final class MarkdownContent: DocumentContent {
     public init(doc: MarkdownDocument, baseDir: URL?) {
         self.doc = doc
         self.baseDir = baseDir
-        images = ImageStore(doc.images, baseDir: baseDir)
+        images = ImageStore(Array(doc.images), baseDir: baseDir)
         images.onLoad = { [weak self] in self?.onNeedsLayout?() }
     }
 

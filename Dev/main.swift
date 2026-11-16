@@ -246,6 +246,92 @@ func parsebench(_ args: [String]) {
     print(String(format: "parse %.3fms (%.0f MB/s)", Double(best) / 1e6, Double(text.count) / Double(best) * 1e3))
 }
 
+/// Differential check for the markdown parser: writes a complete dump of each parsed
+/// document (text, blocks, runs, links, images, tables, headings) to `<outdir>/<name>.txt`.
+/// Dump a corpus before and after a parser change, then `diff -r before after`.
+///   peep-dev mddump <outdir> <files or dirs...>
+@MainActor
+func mdDump(_ args: [String]) {
+    guard args.count >= 2 else { print("usage: mddump <outdir> <files or dirs...>"); exit(2) }
+    let outDir = args[0]
+    let fm = FileManager.default
+    try? fm.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+    var files: [String] = []
+    for a in args.dropFirst() {
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: a, isDirectory: &isDir), isDir.boolValue {
+            for f in (try? fm.contentsOfDirectory(atPath: a)) ?? [] where f.hasSuffix(".md") || f.hasSuffix(".markdown") {
+                files.append(a + "/" + f)
+            }
+        } else { files.append(a) }
+    }
+    files.sort()
+    var bytes = 0
+    for path in files {
+        guard let f = try? FileLoader.load(path: path, limit: 1 << 30),
+              case .text(let text, _, _) = Decoder.decode(f.raw) else { continue }
+        bytes += text.count
+        let d = MarkdownParser.parse(text)
+        let out = dumpMarkdown(d)
+        let name = (path as NSString).lastPathComponent
+        try! out.write(toFile: outDir + "/" + name + ".txt", atomically: false, encoding: .utf8)
+    }
+    print("dumped \(files.count) files (\(bytes) bytes) to \(outDir)")
+}
+
+/// Every field of a parsed document, one fact per line. Text is shown per block with
+/// control characters escaped, so a diff points at the block that changed.
+func dumpMarkdown(_ d: MarkdownDocument) -> String {
+    var o = ""
+    func esc(_ s: Int, _ e: Int) -> String {
+        let s = max(0, min(s, d.text.count)), e = max(s, min(e, d.text.count))
+        let str = String(decoding: UnsafeBufferPointer(start: d.text.base + s, count: e - s), as: UTF8.self)
+        var r = ""
+        for u in str.unicodeScalars {
+            switch u {
+            case "\n": r += "\\n"
+            case "\t": r += "\\t"
+            case "\\": r += "\\\\"
+            case "\u{FFFC}": r += "\\obj"
+            default: r.unicodeScalars.append(u)
+            }
+        }
+        return r
+    }
+    o += "text \(d.text.count) bytes, \(d.blocks.count) blocks, \(d.runs.count) runs\n"
+    var covered = 0
+    for (i, b) in d.blocks.enumerated() {
+        if Int(b.textStart) != covered { o += "GAP \(covered)..<\(b.textStart): \(esc(covered, Int(b.textStart)))\n" }
+        covered = Int(b.textEnd) + 1
+        o += "B\(i) \(b.kind) lv\(b.level) q\(b.quoteDepth) l\(b.listDepth) \(b.marker) #\(b.markerNumber) tight=\(b.tight) \(b.align)"
+        o += " text \(b.textStart)..<\(b.textEnd) runs \(b.runStart)..<\(b.runEnd)"
+        if b.kind == .code { o += " lang=\(b.language.name)" }
+        if b.table >= 0 { o += " table=\(b.table)" }
+        if b.heading >= 0 { o += " heading=\(b.heading)" }
+        o += "\n  |\(esc(Int(b.textStart), Int(b.textEnd)))|\n"
+        if Int(b.textEnd) < d.text.count && d.text.base[Int(b.textEnd)] != 0x0A { o += "  NO SEPARATOR\n" }
+        for r in Int(b.runStart)..<Int(b.runEnd) {
+            let run = d.runs[r]
+            o += "  R\(r) \(run.start)..<\(run.end) style=\(run.style.rawValue) ref=\(run.ref) |\(esc(Int(run.start), Int(run.end)))|\n"
+        }
+    }
+    if covered < d.text.count { o += "TAIL \(covered)..<\(d.text.count): \(esc(covered, d.text.count))\n" }
+    let blockRuns = d.blocks.reduce(0) { $0 + Int($1.runEnd - $1.runStart) }
+    if blockRuns != d.runs.count { o += "RUNS OUTSIDE BLOCKS: \(d.runs.count - blockRuns)\n" }
+    for i in 0..<d.links.count { o += "L\(i) \(d.links[i])\n" }
+    for (i, m) in d.images.enumerated() {
+        o += "I\(i) url=\(m.url) alt=\(m.alt) w=\(m.width) h=\(m.height) dark=\(m.darkURL ?? "-")\n"
+    }
+    for (i, t) in d.tables.enumerated() {
+        o += "T\(i) cols=\(t.columns) aligns=\(t.aligns.map { "\($0)" }.joined(separator: ",")) cells=\(t.cells.count)\n"
+        for (c, cell) in t.cells.enumerated() {
+            o += "  C\(c) text \(cell.textStart)..<\(cell.textEnd) runs \(cell.runStart)..<\(cell.runEnd) |\(esc(Int(cell.textStart), Int(cell.textEnd)))|\n"
+        }
+    }
+    for (i, h) in d.headings.enumerated() { o += "H\(i) level=\(h.level) block=\(h.block) slug=\(h.slug) title=\(h.title)\n" }
+    return o
+}
+
 /// Markdown parse + layout timing, repeated (for profiling).
 @MainActor
 func mdbench(_ args: [String]) {
@@ -469,6 +555,7 @@ MainActor.assumeIsolated {
     case "findbench": findBench(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
     case "parsebench": parsebench(Array(args.dropFirst()))
+    case "mddump": mdDump(Array(args.dropFirst()))
     case "icon": icon(Array(args.dropFirst()))
     default: print("unknown command"); exit(2)
     }
