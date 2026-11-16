@@ -13,7 +13,7 @@ func mdDump(_ src: String) -> [String] {
         case .rule: tag = "HR"
         case .table: tag = "TABLE"
         case .html: tag = "HTML"
-        case .footnote: tag = "FN"
+        case .alertTitle: tag = "P"
         }
         if b.quoteDepth > 0 { tag = "Q\(b.quoteDepth)" + tag }
         if b.listDepth > 0 {
@@ -28,6 +28,7 @@ func mdDump(_ src: String) -> [String] {
             tag = "L\(b.listDepth)\(m)\(b.tight ? "t" : "")" + tag
         }
         if b.align == .center { tag += "^" }
+        if b.alert != .none { tag = "\(b.alert)\(b.kind == .alertTitle ? "-title" : ""):" + tag }
         // Re-insert markers for runs inside this block.
         var opens: [Int: [String]] = [:], closes: [Int: [String]] = [:]
         for r in d.runs[Int(b.runStart)..<Int(b.runEnd)] {
@@ -170,11 +171,63 @@ let markdownTests: [Test] = [
     },
     Test("md: front matter hidden, rules, footnotes") {
         expectMD("---\ntitle: x\n---\n# Doc\n\n---\n\nText[^1]\n\n[^1]: Note", [
-            "H1|Doc", "HR|", "P|Text^1^", "P|^1^ Note",
+            "H1|Doc", "HR|", "P|Text[^1^](#fn:1)", "HR|", "L11.P|Note [↩︎](#fnref:1:1)",
         ])
-        // Definitions on consecutive lines each start a line; "[^x]" mid-line stays a reference.
-        expectMD("A[^1] B[^b]\n\n[^1]: One\n[^b]: Two [^1]: three\n  [^c] four", [
-            "P|A^1^ B^2^", "P|^1^ One⏎^2^ Two ^1^: three ^3^ four",
+    },
+    Test("md: footnotes") {
+        // Numbered by first reference; consecutive definitions; undefined references stay text.
+        expectMD("A[^b] B[^a] C[^none]\n\n[^a]: Alpha\n[^b]: Beta", [
+            "P|A[^1^](#fn:1) B[^2^](#fn:2) C[^none]", "HR|",
+            "L11.P|Beta [↩︎](#fnref:1:1)", "L12.tP|Alpha [↩︎](#fnref:2:1)",
+        ])
+        // Unreferenced definitions are dropped (no footnotes section at all).
+        expectMD("text\n\n[^x]: unused", ["P|text"])
+        // Several paragraphs and code (indented 4), lazy continuation, then main text again.
+        expectMD("x[^n]\n\n[^n]: First\nlazy line.\n\n    Second.\n\n        code\n\nAfter.", [
+            "P|x[^1^](#fn:1)", "P|After.", "HR|", "L11.P|First lazy line.", "L1P|Second.",
+            "L1CODE(Plain Text)|code", "L1P|[↩︎](#fnref:1:1)",
+        ])
+        // Repeated references get one back-link each; labels are case-insensitive.
+        expectMD("a[^Note] b[^note]\n\n[^NOTE]: n", [
+            "P|a[^1^](#fn:1) b[^1^](#fn:1)", "HR|", "L11.P|n [↩︎](#fnref:1:1) [↩︎](#fnref:1:2)[^2^](#fnref:1:2)",
+        ])
+        // A definition interrupts a paragraph, and inside a quote it still renders at the end.
+        expectMD("Para\n[^1]: def\n\n> q[^2]\n>\n> [^2]: quoted\n\nr[^1]", [
+            "P|Para", "Q1P|q[^1^](#fn:1)", "P|r[^2^](#fn:2)", "HR|",
+            "L11.P|quoted [↩︎](#fnref:1:1)", "L12.tP|def [↩︎](#fnref:2:1)",
+        ])
+        // A footnote referenced only from another footnote follows it.
+        expectMD("a[^1]\n\n[^1]: see[^2]\n[^2]: two", [
+            "P|a[^1^](#fn:1)", "HR|", "L11.P|see[^2^](#fn:2) [↩︎](#fnref:1:1)", "L12.tP|two [↩︎](#fnref:2:1)",
+        ])
+        // A definition after a list closes the list (unmatched containers close first).
+        expectMD("- a[^1]\n[^1]: b", ["L1•P|a[^1^](#fn:1)", "HR|", "L11.P|b [↩︎](#fnref:1:1)"])
+        // Labels with spaces aren't footnotes.
+        expectMD("a[^b c]\n\n[^b c]: x", ["P|a[^b c]", "P|[^b c]: x"])
+    },
+    Test("md: blank quote line separates paragraphs") {
+        expectMD("> a\n>\n> b\n\n> - x\n>\n> - y", ["Q1P|a", "Q1P|b", "L1•Q1P|x", "L1•Q1P|y"])
+        // A marker with nothing after it is a blank line for the item: one blank more ends it.
+        expectMD("-\n\n  foo", ["L1•P|", "P|foo"])
+        expectMD("-\n  foo", ["L1•P|foo"])
+    },
+    Test("md: emoji shortcodes") {
+        expectMD(":tada: ok:+1: :heart:\n:not_an_emoji: 10:30:00 https://x.test/a:b `:tada:` :tada", [
+            "P|🎉\u{FE0F} ok👍\u{FE0F} ❤\u{FE0F} :not_an_emoji: 10:30:00 [https://x.test/a:b](https://x.test/a:b) `:tada:` :tada",
+        ])
+        expectMD("# Release :rocket:\n\n:hash: :england:", ["H1|Release 🚀\u{FE0F}", "P|#\u{FE0F}\u{20E3} 🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"])
+    },
+    Test("md: alerts") {
+        expectMD("> [!NOTE]\n> Body *text*.\n\n> [!tip]\n> lower case", [
+            "note-title:Q1P|Note", "note:Q1P|Body _text_.", "tip-title:Q1P|Tip", "tip:Q1P|lower case",
+        ])
+        // Not alerts: text after the marker, marker not on the first line, unknown type, nested quote.
+        expectMD("> [!NOTE] text\n\n> first\n> [!WARNING]\n\n> [!INFO]\n> x\n\n> > [!CAUTION]\n> > y", [
+            "Q1P|[!NOTE] text", "Q1P|first [!WARNING]", "Q1P|[!INFO] x", "Q2P|[!CAUTION] y",
+        ])
+        // In a list item; nested quote inside an alert; a title-only alert.
+        expectMD("- > [!WARNING]\n  > careful\n  > > inner\n\n> [!IMPORTANT]", [
+            "warning-title:L1•Q1P|Warning", "warning:L1tQ1P|careful", "warning:L1tQ2P|inner", "important-title:Q1P|Important",
         ])
     },
     Test("md: consecutive reference definitions") {

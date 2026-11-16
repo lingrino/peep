@@ -6,8 +6,9 @@ press Space, and get a syntax-highlighted (or rendered) preview. Press ⌘F to s
 - **Code**: ~60 languages and formats, hand-written lexers, line numbers, no wrapping,
   selection and copy, light/dark themes modeled on Xcode's.
 - **Markdown**: CommonMark + GitHub extensions (tables, task lists, strikethrough, autolinks,
-  footnotes), highlighted code blocks, images (local and remote), a common subset of inline
-  HTML, and a table-of-contents sidebar.
+  footnotes with back-links, alerts like `> [!NOTE]`, `:emoji:` shortcodes), highlighted code
+  blocks, images (local and remote), a common subset of inline HTML, and a table-of-contents
+  sidebar.
 - **Outline**: a sidebar of headings (Markdown) or declarations (code) that follows the scroll.
 - **Find**: ⌘F, ⌘G/⇧⌘G, Return/⇧Return, Esc — incremental, smart-case, SIMD search.
 - **Archives**: ZIP-family (zip, jar, whl, apk, …), tar, tar.gz, tar.xz listed as a tree;

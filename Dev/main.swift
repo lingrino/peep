@@ -354,6 +354,8 @@ func dumpMarkdown(_ d: MarkdownDocument) -> String {
         if b.kind == .code { o += " lang=\(b.language.name)" }
         if b.table >= 0 { o += " table=\(b.table)" }
         if b.heading >= 0 { o += " heading=\(b.heading)" }
+        if b.footnote > 0 { o += " footnote=\(b.footnote)" }
+        if b.alert != .none { o += " alert=\(b.alert)" }
         o += "\n  |\(esc(Int(b.textStart), Int(b.textEnd)))|\n"
         if Int(b.textEnd) < d.text.count && d.text.base[Int(b.textEnd)] != 0x0A { o += "  NO SEPARATOR\n" }
         for r in Int(b.runStart)..<Int(b.runEnd) {
@@ -374,6 +376,7 @@ func dumpMarkdown(_ d: MarkdownDocument) -> String {
             o += "  C\(c) text \(cell.textStart)..<\(cell.textEnd) runs \(cell.runStart)..<\(cell.runEnd) |\(esc(Int(cell.textStart), Int(cell.textEnd)))|\n"
         }
     }
+    for (i, r) in d.footnoteRefs.enumerated() { o += "F\(i + 1) block=\(d.footnoteBlocks[i]) refs=\(r)\n" }
     let slugs = d.headingSlugs()
     for (i, h) in d.headings.enumerated() { o += "H\(i) level=\(h.level) block=\(h.block) slug=\(slugs[i]) title=\(h.title)\n" }
     return o

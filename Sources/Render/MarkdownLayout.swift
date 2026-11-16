@@ -53,7 +53,7 @@ final class FontBook: @unchecked Sendable {
     }
 }
 
-enum DecoRole: Sendable { case border, blockBackground, secondary, text, accent }
+enum DecoRole: Sendable { case border, blockBackground, secondary, text, accent, alert(MDAlert) }
 
 enum Deco: @unchecked Sendable {
     case fill(CGRect, DecoRole, CGFloat)
@@ -61,6 +61,7 @@ enum Deco: @unchecked Sendable {
     case bullet(CGPoint, Int)                 // center, depth
     case label(CTLine, CGPoint)               // ordered list number, right-aligned origin
     case check(CGRect, Bool)
+    case alertIcon(CGRect, MDAlert)
 
     func offset(_ dy: CGFloat) -> Deco {
         switch self {
@@ -69,6 +70,7 @@ enum Deco: @unchecked Sendable {
         case .bullet(let p, let d): return .bullet(CGPoint(x: p.x, y: p.y + dy), d)
         case .label(let l, let p): return .label(l, CGPoint(x: p.x, y: p.y + dy))
         case .check(let r, let done): return .check(r.offsetBy(dx: 0, dy: dy), done)
+        case .alertIcon(let r, let a): return .alertIcon(r.offsetBy(dx: 0, dy: dy), a)
         }
     }
 }
@@ -179,11 +181,29 @@ enum MarkdownLayout {
         out.right = env.x0 + env.contentW
         var y: CGFloat = 0
         switch b.kind {
-        case .paragraph, .html, .footnote:
-            let a = inline(env, b.textStart, b.textEnd, runs: b.runStart..<b.runEnd, font: env.fonts.font(m.body),
-                           color: b.quoteDepth > 0 ? env.palette.secondaryText : env.palette.text, align: b.align)
+        case .paragraph, .html, .alertTitle:
+            if b.kind == .alertTitle {
+                // Icon and colored title ("Note", "Warning", ...), as GitHub draws them.
+                let color = env.palette.alert[Int(b.alert.rawValue)]
+                let a = inline(env, b.textStart, b.textEnd, runs: b.runStart..<b.runEnd,
+                               font: env.fonts.font(m.body, weight: .semibold), color: color, align: .left)
+                let icon = (m.body * 1.15).rounded()
+                let box = TextBox(attributed: a, origin: CGPoint(x: bx + icon + 6, y: 0), width: bw - icon - 6,
+                                  start: Int(b.textStart), end: Int(b.textEnd), text: env.doc.text, lineGap: m.lineGap(m.body))
+                out.boxes.append(box)
+                let base = box.baselines.first ?? m.body
+                let r = CGRect(x: bx, y: base - m.body * 0.36 - icon / 2, width: icon, height: icon)
+                out.decos.append(PlacedDeco(minY: r.minY, maxY: r.maxY, deco: .alertIcon(r, b.alert)))
+                y = box.rect.maxY
+                break
+            }
+            // Footnotes: smaller and muted, as on GitHub. Alert bodies keep the text color.
+            let size = b.footnote > 0 ? (m.body * 0.92).rounded() : m.body
+            let muted = b.footnote > 0 || (b.quoteDepth > 0 && !(b.alert != .none && b.quoteDepth == 1))
+            let a = inline(env, b.textStart, b.textEnd, runs: b.runStart..<b.runEnd, font: env.fonts.font(size),
+                           color: muted ? env.palette.secondaryText : env.palette.text, align: b.align)
             let box = TextBox(attributed: a, origin: CGPoint(x: bx, y: 0), width: bw, start: Int(b.textStart),
-                              end: Int(b.textEnd), text: env.doc.text, lineGap: m.lineGap(m.body))
+                              end: Int(b.textEnd), text: env.doc.text, lineGap: m.lineGap(size))
             out.boxes.append(box)
             y = box.rect.maxY
         case .heading:

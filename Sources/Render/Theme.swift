@@ -14,6 +14,8 @@ public final class Palette: @unchecked Sendable {
     public let blockBackground: CGColor   // markdown code blocks, inline code, table header
     public let border: CGColor            // table borders, rules, quote bars
     public let link: CGColor
+    /// GitHub alert accents, indexed by `MDAlert.rawValue` (0 unused).
+    public let alert: [CGColor]
     /// Per-TokenKind foreground and whether to use the bold font.
     public let tokenColors: [CGColor]
     public let tokenBold: [Bool]
@@ -33,6 +35,7 @@ public final class Palette: @unchecked Sendable {
             background = c(0x1F1F24); text = c(0xDFDFE0); secondaryText = c(0x6C6C75)
             selection = c(0x3F638B); findMatch = c(0x8A7A22, 0.55); findCurrent = c(0xD4A52A)
             blockBackground = c(0x2A2A31); border = c(0x3A3A42); link = c(0x5E9BFF)
+            alert = [border, c(0x4493F8), c(0x3FB950), c(0xAB7DF8), c(0xD29922), c(0xF85149)]
             set(.plain, 0xDFDFE0); set(.comment, 0x7F8C98); set(.keyword, 0xFC5FA3, bold: true)
             set(.type, 0x5DD8FF); set(.function, 0x67B7A4); set(.string, 0xFC6A5D); set(.escape, 0xD0BF69)
             set(.number, 0xD0BF69); set(.constant, 0xFC5FA3); set(.builtin, 0xFC5FA3, bold: true)
@@ -47,6 +50,7 @@ public final class Palette: @unchecked Sendable {
             background = c(0xFFFFFF); text = c(0x1F1F24); secondaryText = c(0xA3A3AB)
             selection = c(0xB4D7FF); findMatch = c(0xFFE873, 0.6); findCurrent = c(0xFFC531)
             blockBackground = c(0xF5F5F7); border = c(0xDCDCE0); link = c(0x0B63CE)
+            alert = [border, c(0x0969DA), c(0x1A7F37), c(0x8250DF), c(0x9A6700), c(0xD1242F)]
             set(.plain, 0x1F1F24); set(.comment, 0x5D6C79); set(.keyword, 0xAD3DA4, bold: true)
             set(.type, 0x0B4F79); set(.function, 0x326D74); set(.string, 0xC41A16); set(.escape, 0x1C00CF)
             set(.number, 0x1C00CF); set(.constant, 0xAD3DA4); set(.builtin, 0xAD3DA4, bold: true)

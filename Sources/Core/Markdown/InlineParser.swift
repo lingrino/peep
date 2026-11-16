@@ -61,7 +61,10 @@ final class InlineParser {
     var strings: ByteBuf
     var links: RawArray<StrRange>
     var images: RawArray<MDImageSpec>
-    var footnotes: [String: Int] = [:]
+    /// Footnotes: created by the first definition, so documents without any pay nothing.
+    var notes: Footnotes?
+    /// The block being parsed has footnote references (their offsets are known after emit).
+    var blockHasFootnoteRefs = false
     /// Block-level hints discovered while parsing HTML (align, heading level).
     var blockAlign: MDAlign = .left
     /// Alignment of open `<div>`/`<center>` elements. They often span several Markdown blocks
@@ -241,7 +244,6 @@ final class InlineParser {
         let set = specialSet
         var i = 0
         var textStart = 0
-        var lineStart = 0   // first non-space byte of the current line
         @inline(__always) func flush(_ upto: Int) {
             if upto > textStart { text(textStart, upto) }
         }
@@ -256,6 +258,17 @@ final class InlineParser {
             let k = cls[Int(b)]
             if k == 0 { i &+= 1; continue }   // (the vector set is exact; never taken)
             if k == 2 {
+                // Emoji shortcode (":tada:"). The name bytes and closing colon are checked
+                // before the table: most colons ("https:", "10:30", "Note:") fail at once.
+                if b == 0x3A && i + 2 < n && Emoji.isNameByte(p[i + 1]), let (end, e) = InlineParser.emoji(p, i, n) {
+                    flush(i)
+                    let m = scratch.count
+                    scratch.append(e.baseAddress!, e.count)
+                    scratchText(from: m)
+                    i = end
+                    textStart = i
+                    continue
+                }
                 // GFM bare autolinks at word starts (www., http://, https://), found from the
                 // ':' or '.' that follows the prefix.
                 if let s = autolinkStart(p, i, textStart), let e = InlineParser.bareAutolink(p, s, n) {
@@ -294,14 +307,10 @@ final class InlineParser {
                 var spaces = 0
                 while e > textStart && p[e - 1] == 0x20 { e -= 1; spaces += 1 }
                 flush(e)
+                add(spaces >= 2 ? InlineParser.kHard : InlineParser.kSoft)
                 i += 1
                 while i < n && (p[i] == 0x20 || p[i] == 0x09) { i += 1 }
-                // Footnote definitions are usually written one per line with no blank line
-                // between them (a lazy continuation here): each starts its own line.
-                let footnote = i + 1 < n && p[i] == 0x5B && p[i + 1] == 0x5E && InlineParser.isFootnoteDefinition(p, i, n)
-                add(spaces >= 2 || footnote ? InlineParser.kHard : InlineParser.kSoft)
                 textStart = i
-                lineStart = i
             case 0x60: // code span
                 var k = i
                 while k < n && p[k] == 0x60 { k += 1 }
@@ -344,20 +353,23 @@ final class InlineParser {
                 } else { i += 1 }
             case 0x5B: // [
                 flush(i)
-                // Footnote reference [^label] (and definition "[^label]:" at block start).
-                if i + 1 < n && p[i + 1] == 0x5E, let close = InlineParser.findByte(p, i + 2, n, 0x5D), close > i + 2 {
-                    let label = String(decoding: UnsafeBufferPointer(start: p + i + 2, count: close - i - 2), as: UTF8.self)
-                    let isDef = close + 1 < n && p[close + 1] == 0x3A && i == lineStart
-                    let num: Int
-                    if let v = footnotes[label] { num = v } else { num = footnotes.count + 1; footnotes[label] = num }
+                // Footnote reference [^label] to a defined footnote: a superscript number
+                // linking to it. (Undefined ones stay text.)
+                if notes != nil && i + 1 < n && p[i + 1] == 0x5E,
+                   let close = InlineParser.findByte(p, i + 2, n, 0x5D), close > i + 2,
+                   let num = footnoteReference(p + i + 2, close - i - 2) {
                     let fs = Int32(MDStyle.superscript.rawValue | MDStyle.footnoteRef.rawValue)
+                    let ref = addLink("#fn:\(num)")
+                    notes!.links[ref] = num
+                    blockHasFootnoteRefs = true
                     add(InlineParser.kOpen, c: fs)
+                    add(InlineParser.kLinkOpen, c: ref)
                     let m = scratch.count
-                    InlineParser.appendDecimal(num, &scratch)
+                    InlineParser.appendDecimal(Int(num), &scratch)
                     scratchText(from: m)
+                    add(InlineParser.kLinkClose)
                     add(InlineParser.kClose, c: fs)
-                    i = close + (isDef ? 2 : 1)
-                    if isDef { scratchText(" "); while i < n && p[i] == 0x20 { i += 1 } }
+                    i = close + 1
                     textStart = i
                     continue
                 }
@@ -777,10 +789,83 @@ final class InlineParser {
         }
     }
 
-    /// `[^label]:` at `i` (which is at a `[^`), within one line.
-    static func isFootnoteDefinition(_ p: UnsafePointer<UInt8>, _ i: Int, _ n: Int) -> Bool {
-        guard let close = findByte(p, i + 2, n, 0x5D), close > i + 2 else { return false }
-        return close + 1 < n && p[close + 1] == 0x3A
+    /// Shortcode at the ':' at `i`: where it ends and its emoji, or nil. Out of line: the
+    /// tokenizer loop stays small.
+    @inline(never)
+    static func emoji(_ p: UnsafePointer<UInt8>, _ i: Int, _ n: Int) -> (Int, UnsafeBufferPointer<UInt8>)? {
+        var j = i + 2
+        while j < n && j - i <= 64 && Emoji.isNameByte(p[j]) { j += 1 }
+        guard j < n && p[j] == 0x3A, let e = Emoji.lookup(p + i + 1, j - i - 1) else { return nil }
+        return (j + 1, e)
+    }
+
+    // MARK: - Footnotes
+
+    /// Definitions are found by the block pass; references number them in the order they're
+    /// first referenced (as GitHub does).
+    final class Footnotes {
+        /// Definition index by label (ASCII-lowercased). Repeated labels keep the first.
+        var labels: [String: Int32] = [:]
+        /// Number of each definition once referenced (index = definition), 0 = unreferenced.
+        var number: [Int32] = []
+        /// Definitions in number order.
+        var order: [Int32] = []
+        /// Footnote number of each footnote reference link (key: link index).
+        var links: [Int32: Int32] = [:]
+        /// Text offsets of each footnote's references (index = number - 1).
+        var refs: [[Int32]] = []
+    }
+
+    static func footnoteKey(_ p: UnsafePointer<UInt8>, _ n: Int) -> String {
+        String(unsafeUninitializedCapacity: n) { b in
+            for k in 0..<n { let c = p[k]; b[k] = c >= 0x41 && c <= 0x5A ? c | 0x20 : c }
+            return n
+        }
+    }
+
+    /// A definition found by the block pass: its index (blocks carry it).
+    func defineFootnote(_ p: UnsafePointer<UInt8>, _ n: Int) -> Int32 {
+        let f = notes ?? Footnotes()
+        notes = f
+        let d = Int32(f.number.count)
+        f.number.append(0)
+        let key = InlineParser.footnoteKey(p, n)
+        if f.labels[key] == nil { f.labels[key] = d }
+        return d
+    }
+
+    /// Number of the footnote `label` refers to (numbered on first reference), nil if undefined.
+    func footnoteReference(_ p: UnsafePointer<UInt8>, _ n: Int) -> Int32? {
+        for k in 0..<n where p[k] == 0x20 || p[k] == 0x09 || p[k] == 0x0A { return nil }
+        guard let f = notes, let d = f.labels[InlineParser.footnoteKey(p, n)] else { return nil }
+        if f.number[Int(d)] == 0 {
+            if f.order.count >= Int(Int16.max) { return nil }   // MDBlock.footnote is 16 bits
+            f.order.append(d)
+            f.refs.append([])
+            f.number[Int(d)] = Int32(f.order.count)
+        }
+        return f.number[Int(d)]
+    }
+
+    /// After a block's emit: records where its footnote references landed (back-link targets).
+    func recordFootnoteRefs(fromRun first: Int) {
+        blockHasFootnoteRefs = false
+        guard let f = notes else { return }
+        for r in first..<runs.count {
+            let run = runs[r]
+            // One run per reference: each has its own link (adjacent ones never merge).
+            if run.style.contains(.footnoteRef) && run.ref >= 0, let num = f.links[run.ref] {
+                f.refs[Int(num) - 1].append(run.start)
+            }
+        }
+    }
+
+    /// A link destination added to the string store: its index for link runs.
+    func addLink(_ s: String) -> Int32 {
+        let m = strings.count
+        strings.append(s)
+        links.append(StrRange(start: Int32(m), end: Int32(strings.count)))
+        return Int32(links.count - 1)
     }
 
     /// `[label]: dest "title"` at the start of `p[0..<n]`: bytes consumed (through the line

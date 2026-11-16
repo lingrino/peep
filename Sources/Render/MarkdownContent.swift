@@ -165,11 +165,13 @@ public final class MarkdownContent: DocumentContent {
         var y = m.padTop
         var maxRight = x0
         var prevQuote: UInt8 = 0
+        var prevAlert = MDAlert.none
         for (bi, b) in doc.blocks.enumerated() {
             let r = results[bi]
             if bi > 0 {
                 var g = b.tight ? m.tightGap : m.gap
                 if b.kind == .heading { g = max(g, m.body * (b.level <= 2 ? 1.9 : 1.5)) }
+                if doc.blocks[bi - 1].kind == .alertTitle { g = m.body * 0.4 }   // title sits on its body
                 y += g
             }
             let top = y
@@ -202,11 +204,16 @@ public final class MarkdownContent: DocumentContent {
             if b.quoteDepth > 0 {
                 for q in 0..<Int(b.quoteDepth) {
                     let qx = x0 + CGFloat(q) * m.quoteIndent
-                    let from = q < Int(prevQuote) && bi > 0 ? top - (b.tight ? m.tightGap : m.gap) : top
-                    decos.append(PlacedDeco(minY: from, maxY: y, deco: .fill(CGRect(x: qx, y: from, width: 3, height: y - from), .border, 1.5)))
+                    // An alert's bar is its color, and doesn't join a neighboring quote's.
+                    let alert = q == 0 ? b.alert : .none
+                    let joins = q < Int(prevQuote) && bi > 0 && !(q == 0 && (b.kind == .alertTitle || b.alert != prevAlert))
+                    let from = joins ? top - (b.tight ? m.tightGap : m.gap) : top
+                    let role: DecoRole = alert == .none ? .border : .alert(alert)
+                    decos.append(PlacedDeco(minY: from, maxY: y, deco: .fill(CGRect(x: qx, y: from, width: 3, height: y - from), role, 0)))   // square: segments meet seamlessly
                 }
             }
             prevQuote = b.quoteDepth
+            prevAlert = b.alert
             blocks.append(LBlock(y: top, h: y - top, box0: box0, boxN: boxes.count - box0))
         }
         size = CGSize(width: max(width, maxRight + m.padX), height: y + m.padTop * 1.5)
@@ -241,6 +248,7 @@ public final class MarkdownContent: DocumentContent {
             case .secondary: p.secondaryText
             case .text: p.text
             case .accent: p.link
+            case .alert(let a): p.alert[Int(a.rawValue)]
             }
         }
         switch d {
@@ -267,6 +275,8 @@ public final class MarkdownContent: DocumentContent {
             let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
             ctx.textPosition = CGPoint(x: origin.x - w, y: origin.y)
             CTLineDraw(line, ctx)
+        case .alertIcon(let r, let a):
+            drawAlertIcon(a, in: r, ctx: ctx, palette: p)
         case .check(let r, let done):
             let path = CGPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 3, cornerHeight: 3, transform: nil)
             if done {
@@ -288,6 +298,51 @@ public final class MarkdownContent: DocumentContent {
                 ctx.strokePath()
             }
         }
+    }
+
+    /// SF Symbol per alert type, tinted, rendered once per appearance.
+    private var alertIcons: [Int: CGImage] = [:]
+
+    private func drawAlertIcon(_ a: MDAlert, in r: CGRect, ctx: CGContext, palette p: Palette) {
+        let key = Int(a.rawValue) << 1 | (p.isDark ? 1 : 0)
+        var img = alertIcons[key]
+        if img == nil {
+            let name = switch a {
+            case .note: "info.circle"
+            case .tip: "lightbulb"
+            case .important: "exclamationmark.bubble"
+            case .warning: "exclamationmark.triangle"
+            case .caution: "exclamationmark.octagon"
+            case .none: ""
+            }
+            let color = NSColor(cgColor: p.alert[Int(a.rawValue)]) ?? .labelColor
+            let cfg = NSImage.SymbolConfiguration(pointSize: r.height * 0.82, weight: .medium)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+            if let sym = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+                // Rasterized at 3x the box (sharp on Retina tiles), centered in a square.
+                let px = Int(r.width * 3)
+                if let bm = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                    let s = CGFloat(px) / r.width
+                    let fit = min(r.width / sym.size.width, r.height / sym.size.height)
+                    let w = sym.size.width * fit, h = sym.size.height * fit
+                    NSGraphicsContext.saveGraphicsState()
+                    NSGraphicsContext.current = NSGraphicsContext(cgContext: bm, flipped: false)
+                    sym.draw(in: CGRect(x: (r.width - w) / 2 * s, y: (r.height - h) / 2 * s, width: w * s, height: h * s))
+                    NSGraphicsContext.restoreGraphicsState()
+                    img = bm.makeImage()
+                }
+            }
+            alertIcons[key] = img
+        }
+        guard let img else { return }
+        ctx.saveGState()
+        ctx.translateBy(x: r.minX, y: r.maxY)   // flipped context: draw upside down
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.interpolationQuality = .high
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: r.width, height: r.height))
+        ctx.restoreGState()
     }
 
     func drawImage(_ index: Int, in r: CGRect, ctx: CGContext) {
@@ -446,12 +501,29 @@ public final class MarkdownContent: DocumentContent {
         return cur
     }
 
-    public func anchorY(_ name: String) -> CGFloat? {
+    public func anchorSpan(_ name: String) -> (top: CGFloat, height: CGFloat)? {
         finishLayout()
         let n = name.hasPrefix("#") ? String(name.dropFirst()) : name
+        // Footnotes ("fn:N") and references ("fnref:N:k"): ids no heading slug can have.
+        if n.hasPrefix("fn:") || n.hasPrefix("fnref:") {
+            let parts = n.split(separator: ":").compactMap { Int($0) }
+            guard let note = parts.first, note >= 1 else { return nil }
+            if n.hasPrefix("fn:") {
+                guard note <= doc.footnoteBlocks.count else { return nil }
+                let b = blocks[doc.footnoteBlocks[note - 1]]
+                return (b.y, b.h)
+            }
+            guard note <= doc.footnoteRefs.count, parts.count == 2, parts[1] >= 1,
+                  parts[1] <= doc.footnoteRefs[note - 1].count else { return nil }
+            let off = Int(doc.footnoteRefs[note - 1][parts[1] - 1])
+            // The line holding the reference.
+            guard let k = box(containing: off) else { return nil }
+            let r = boxes[k].rect(for: off, off + 1)
+            return (r.minY, r.height)
+        }
         let key = n.removingPercentEncoding ?? n
         guard let i = doc.headingSlugs().firstIndex(where: { $0 == key || $0 == key.lowercased() }) else { return nil }
-        return headingY[i]
+        return (headingY[i], headingHeight[i])
     }
 }
 

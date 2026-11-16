@@ -52,7 +52,7 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 |---|---|
 | `Sources/Core/Text/` | `TextBuffer` (padded bytes), `FileLoader` (incl. tail loads), `Decoder` (encodings/binary), `LineIndex` (SIMD), `Search` (SIMD), `SIMD.swift` helpers, `HexDump`, `JSONFormatter` (minified JSON), `JSONTree` (range-based JSON parse), `ByteOutput` (generated text), `Clock` |
 | `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, markdown source), `Language` (detection table, wrapper suffixes, dispatch), `CodeOutline` (declarations -> sidebar entries) |
-| `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities`, `Notebook` (.ipynb -> Markdown) |
+| `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities`, `Emoji` + generated `EmojiTable` (GitHub shortcodes), `Notebook` (.ipynb -> Markdown) |
 | `Sources/Core/Archive/` | `ArchiveListing` (entries SoA, folder tree, text + tokens), `ZipReader` (central directory), `TarReader` (headers, pax/GNU), `Decompress` (gzip/xz streams, single compressed files) |
 | `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline: archives, compressed files, SQLite, notebooks, minified JSON, logs), `SQLitePreview`, `Prewarm` (launch-time warm-up) |
 | `Sources/Preview/` | `main.swift` (starts `Prewarm`, then `NSExtensionMain`), principal class `PreviewViewController`, `AgentClient` |
@@ -84,6 +84,7 @@ Scripts/dev.sh symbols <files...>          # code outline entries as the sidebar
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
+Scripts/gen-emoji.py <github.json>  # regenerate EmojiTable.swift (emojibase-data en/shortcodes/github.json)
 Scripts/make-examples.sh [--large]  # regenerate Examples/ binaries (deterministic); --large: huge files in Examples/Large (ignored)
 Scripts/setup-signing.sh     # one-time per machine: local code-signing identity
 ```
@@ -153,6 +154,23 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   work; measure the whole corpus (`parsebench <dir>`), not one file.
 - A search for each line's end mispredicted its exit on most lines; `newlineOffsets` finds all
   of them in one branch-light pass (64-byte masks, flattened as in `LineIndex`).
+- Rare syntax must not tax every document. Footnotes, alerts and emoji first cost 4.5–7.6%
+  (corpus, by size bucket) and now ~3%; what mattered, measured by A/B builds:
+  - Pass-2 helpers take the parsers as parameters and the output arrays `inout` from locals.
+    Stored in a struct, the parsers were retained/released per parse (a fixed ~45 ns: −14% on
+    a 24-byte file) and each append called the runtime uniqueness check.
+  - `unowned(unsafe)` references are *worse* than strong `let`s: every method call through
+    them gets a retain/release pair.
+  - Copying arrays out of a struct at the end is a retain + release each; `swap` moves them.
+  - Rare paths go out of line (`@inline(never)`) behind a cheap inline byte check (`[` then
+    `^` before the footnote call: list items starting with a link are common), and per-block
+    context work is gated by a counter (`openSpecial`).
+  - A new byte field can grow a hot struct's stride (`Container` 24 -> 32): put it in padding.
+- Footnotes: definitions are containers (indent 4, like list items) found by the block pass;
+  references number them on first use; their blocks render after the main text (an ordered
+  list, smaller and muted, "↩" back-links). In-document anchors `#fn:N` / `#fnref:N:k` can't
+  collide with heading slugs. Alerts: `> [!NOTE]` alone on the first line of an outermost
+  quote; the title is a block of kind `.alertTitle`.
 
 ## Previews beyond source and Markdown
 
@@ -192,7 +210,9 @@ MB/s = 10^6 B/s, the bar in MiB/s = 2^20 B/s, so 930 MiB/s = 975 MB/s):
 | 3 KB README (HTML + ref defs) parse | 800 MB/s | 500+ MiB/s |
 | 653 real .md files by size: < 2 KB / 2–8 / 8–64 / ≥ 64 KB | 1,000 / 1,190 / 1,190 / 1,070 MB/s | 500+ MiB/s (small) |
 
-Both clear the bar. Markdown parsing was ≈3× short (349 MB/s on the spec) until the
+Both clear the bar. On a 1,300-file corpus (package caches + Homebrew) parsing runs at
+857 / 1,014 / 981 / 840 MB/s by the same size buckets (machine under load; HEAD before
+footnotes/alerts/emoji measured 875 / 1,045 / 1,015 / 870 in the same runs). Markdown parsing was ≈3× short (349 MB/s on the spec) until the
 copy-once redesign described under Performance rules (the old parser on the same 653 files:
 212 / 261 / 280 / 284 MB/s). Slowest left: files under ~200 bytes (fixed cost ≈0.3 µs per
 parse: the document object, two TextBuffers, result arrays), nested-list changelogs (~450 MB/s:

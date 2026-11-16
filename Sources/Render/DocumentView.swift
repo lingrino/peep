@@ -30,8 +30,9 @@ public protocol DocumentContent: AnyObject {
     func link(at point: CGPoint) -> String?
     /// Appearance changed. Return true if the content re-laid out (colors baked into layout).
     func setPalette(_ p: Palette) -> Bool
-    /// Y of a named anchor (markdown heading slug), for in-document links.
-    func anchorY(_ name: String) -> CGFloat?
+    /// Top and height of a named anchor (markdown heading slug, footnote, footnote
+    /// reference), for in-document links.
+    func anchorSpan(_ name: String) -> (top: CGFloat, height: CGFloat)?
     /// About to show `rect` (content space): finish any deferred layout it needs.
     func willShow(_ rect: CGRect)
     /// Sidebar entries (Markdown headings, code declarations); fewer than 3 = no sidebar.
@@ -50,7 +51,7 @@ extension DocumentContent {
     public func drawGutter(_ ctx: CGContext, rect: CGRect, palette: Palette) {}
     public func link(at point: CGPoint) -> String? { nil }
     public func setPalette(_ p: Palette) -> Bool { false }
-    public func anchorY(_ name: String) -> CGFloat? { nil }
+    public func anchorSpan(_ name: String) -> (top: CGFloat, height: CGFloat)? { nil }
     public func willShow(_ rect: CGRect) {}
     public var outlineEntries: [OutlineEntry] { [] }
     public func outlineSpan(_ i: Int) -> (top: CGFloat, height: CGFloat)? { nil }

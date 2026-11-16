@@ -93,12 +93,14 @@ public final class PreviewView: NSView {
         reveal(span, outlineIndex: i)
     }
 
-    private func reveal(_ span: (top: CGFloat, height: CGFloat), outlineIndex i: Int) {
+    private func reveal(_ span: (top: CGFloat, height: CGFloat), outlineIndex i: Int?, alwaysFlash: Bool = false) {
         documentView.scrollToTop(y: span.top - 12)
         let y = scrollView.contentView.bounds.minY
-        pinned = (i, y)
-        if let o = outline, !o.isHidden { o.setCurrent(heading: i) }
-        if span.top - 12 > y + 1 { documentView.flash(top: span.top, height: span.height) }
+        if let i {
+            pinned = (i, y)
+            if let o = outline, !o.isHidden { o.setCurrent(heading: i) }
+        }
+        if alwaysFlash || span.top - 12 > y + 1 { documentView.flash(top: span.top, height: span.height) }
     }
 
     /// Sidebar for Markdown headings and code declarations (3 or more entries).
@@ -132,9 +134,14 @@ public final class PreviewView: NSView {
 
     private func handleLink(_ l: String) {
         if l.hasPrefix("#") {
-            guard let c = document?.content, let y = c.anchorY(l) else { return }
-            let i = c.outlineIndex(atY: y)
-            if i >= 0, let span = c.outlineSpan(i), span.top == y { reveal(span, outlineIndex: i) } else { documentView.scrollToTop(y: y - 12) }
+            guard let c = document?.content, let span = c.anchorSpan(l) else { return }
+            let i = c.outlineIndex(atY: span.top)
+            if i >= 0, c.outlineSpan(i)?.top == span.top {
+                reveal(span, outlineIndex: i)
+            } else {
+                // Footnotes and their references are small targets: always show where they are.
+                reveal(span, outlineIndex: nil, alwaysFlash: true)
+            }
             return
         }
         if let u = URL(string: l), u.scheme != nil { onExternalLink?(l); return }

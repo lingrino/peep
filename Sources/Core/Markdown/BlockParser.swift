@@ -14,6 +14,7 @@ struct PendingBlock: BitwiseCopyable {
     var listDepth: UInt8 = 0
     var marker: MDMarker = .none
     var firstInItem = false
+    var alert: MDAlert = .none           // GitHub alert of the outermost quote
     var markerNumber: Int32 = 0
     var list: Int32 = -1                 // innermost enclosing list (for tight/loose)
     var lineStart: Int32 = 0             // first line (index of a pair in BlockParser.lines)
@@ -37,7 +38,7 @@ final class BlockParser {
     /// Owns the string store and reference table that definitions are added to.
     unowned let inline: InlineParser
 
-    enum ContainerKind: UInt8, BitwiseCopyable { case quote, item }
+    enum ContainerKind: UInt8, BitwiseCopyable { case quote, item, footnote }
     struct Container: BitwiseCopyable {
         var kind: ContainerKind
         var ordered = false
@@ -45,8 +46,9 @@ final class BlockParser {
         var started = false          // item has had content
         var task: MDMarker = .none
         var bullet: UInt8 = 0        // '-', '+', '*' or '.'/')' for ordered
+        var alert: MDAlert = .none   // quote: GitHub alert (one byte, in padding: stride stays 24)
         var indent = 0               // item: columns required to continue
-        var number: Int32 = 0
+        var number: Int32 = 0        // item: list number; footnote: definition index
         var list: Int32 = -1         // index into `lists`
     }
 
@@ -70,6 +72,11 @@ final class BlockParser {
     var aligns: RawArray<MDAlign>
     var lastLineBlank = false
     var pendingBlankItems = false
+    /// Open footnote definitions and alert quotes. While 0 (almost always), emitting a block
+    /// skips the work they need.
+    var openSpecial = 0
+    /// Blocks inside footnote definitions: (block index, definition index) pairs, in order.
+    var noteOf: [Int32] = []
 
     init(_ p: UnsafePointer<UInt8>, _ n: Int, _ inline: InlineParser, _ arena: inout Arena) {
         self.p = p
@@ -190,7 +197,8 @@ final class BlockParser {
                     lastLineBlank = true
                     return
                 }
-                if ind < 4 && BlockParser.plainStart[Int(p[at])] != 0 {
+                let plain = BlockParser.plainStart[Int(p[at])]
+                if ind < 4 && (plain == 1 || (plain == 2 && p[at + 1] != 0x5E)) {
                     if leaf == .table { addLine(at, le); lastLineBlank = false; return }
                     if leaf != .paragraph { closeLeaf(); startLeaf(.paragraph) }
                     addLine(at, le)
@@ -203,7 +211,7 @@ final class BlockParser {
         var pos = ls
         var col = 0
         var matched = 0
-        let blank = isBlank(ls, le)
+        var blank = isBlank(ls, le)
 
         // 1. Continue open containers.
         let depth = stack.count
@@ -221,6 +229,8 @@ final class BlockParser {
                     matched += 1
                 } else { break }
             } else {
+                // Items, and footnote definitions (indent 4, always started: they continue on
+                // blank lines and lines indented 4 columns).
                 if blank {
                     // A blank line keeps an item open unless the item hasn't started yet
                     // and this is its second line (an item can begin with at most one blank).
@@ -277,6 +287,16 @@ final class BlockParser {
                     if p[pos] == 0x09 { col += 4 - col % 4 } else { col += 1 }
                     pos += 1
                 }
+                // GitHub alert: "> [!NOTE]" alone on the quote's first line.
+                if p[pos] == 0x5B && openAlert(pos, le) { return }
+                continue
+            }
+            // "[^": checked here, not in the call (list items starting with a link are common).
+            if b == 0x5B && p[at + 1] == 0x5E, let content = openFootnote(at, le, closeFrom: opened ? -1 : matched) {
+                opened = true
+                matched = stack.count
+                col += ind + (content - at)
+                pos = content
                 continue
             }
             // Only bullets and digits can start an item: skip the call for everything else.
@@ -298,6 +318,10 @@ final class BlockParser {
             break
         }
 
+        // A line whose rest is blank after its container markers (">" alone) is a blank line
+        // inside those containers: it ends a paragraph there.
+        if !blank { blank = isBlank(pos, le) }
+
         // 4. Lazy paragraph continuation.
         if !opened && !allMatched && leaf == .paragraph && !blank && !startsBlock(pos, le, col: col) {
             addLine(firstNonSpace(pos, le), le)
@@ -318,15 +342,20 @@ final class BlockParser {
         let t = UnsafeMutablePointer<UInt8>.allocate(capacity: 256)
         t.initialize(repeating: 1, count: 256)
         for c in ">-+*#`~<=_|: \t".utf8 { t[Int(c)] = 0 }
+        t[0x5B] = 2   // '[': plain unless "[^" (a footnote definition)
         for c in UInt8(0x30)...UInt8(0x39) { t[Int(c)] = 0 }
         return UnsafePointer(t)
     }()
 
-    func closeUnmatched(_ matched: Int) {
-        if matched < stack.count {
-            closeLeaf()
-            while stack.count > matched { closeContainer() }
-        }
+    /// Inline check, out-of-line work: called for nearly every line inside containers, and
+    /// almost always there's nothing to close.
+    @inline(__always) func closeUnmatched(_ matched: Int) {
+        if matched < stack.count { closeContainers(above: matched) }
+    }
+
+    @inline(never) func closeContainers(above matched: Int) {
+        closeLeaf()
+        while stack.count > matched { closeContainer() }
     }
 
     func firstNonSpace(_ pos: Int, _ le: Int) -> Int {
@@ -341,6 +370,7 @@ final class BlockParser {
         if ind >= 4 || at >= le { return false }
         let b = p[at]
         if b == 0x3E { return true }
+        if b == 0x5B && p[at + 1] == 0x5E && footnoteStart(at, le) != nil { return true }
         if isThematicBreak(at, le) || atxLevel(at, le) > 0 || isOpeningFence(at, le) { return true }
         if listMarker(at, le, col: col + ind, interruptsParagraph: true) != nil { return true }
         if b == 0x3C && htmlStart(at, le, interrupting: true) > 0 { return true }
@@ -492,8 +522,12 @@ final class BlockParser {
         }
         var q: UInt8 = 0, l: UInt8 = 0
         var item = -1
-        for k in 0..<stack.count {
-            if stack[k].kind == .quote { q += 1 } else { l += 1; item = k }
+        if openSpecial == 0 {
+            for k in 0..<stack.count {
+                if stack[k].kind == .quote { q += 1 } else { l += 1; item = k }
+            }
+        } else {
+            item = specialContext(&b, &q, &l)
         }
         b.quoteDepth = q
         b.listDepth = l
@@ -594,7 +628,10 @@ final class BlockParser {
         if list < 0 {
             var parent: Int32 = -1
             var k = stack.count - 1
-            while k >= 0 { if stack[k].kind == .item { parent = stack[k].list; break }; k -= 1 }
+            while k >= 0 && stack[k].kind != .footnote {
+                if stack[k].kind == .item { parent = stack[k].list; break }
+                k -= 1
+            }
             lists.append(ListInfo(firstBlock: Int32(blocks.count), lastBlock: Int32(blocks.count), parent: parent))
             list = Int32(lists.count - 1)
         }
@@ -617,25 +654,57 @@ final class BlockParser {
         if c.kind == .item {
             lastClosed = ClosedItem(depth: stack.count, bullet: c.bullet, ordered: c.ordered, list: c.list, number: c.number)
             hasLastClosed = true
-            if !c.emitted {
-                // Empty item: still draw its marker.
-                var b = PendingBlock(kind: .paragraph)
-                b.lineStart = Int32(lines.count >> 1)
-                b.lineCount = 0
-                var q: UInt8 = 0, l: UInt8 = 0
-                for k in 0..<stack.count { if stack[k].kind == .quote { q += 1 } else { l += 1 } }
-                b.quoteDepth = q
-                b.listDepth = l + 1
-                b.list = c.list
-                b.firstInItem = true
-                b.marker = c.task != .none ? c.task : (c.ordered ? .ordered : .bullet)
-                b.markerNumber = c.number
-                lists[Int(c.list)].lastBlock = Int32(blocks.count)
-                blocks.append(b)
-            }
+            if !c.emitted { emitEmptyItem(c) }
         } else {
             hasLastClosed = false
+            if c.kind == .footnote || c.alert != .none { openSpecial -= 1 }
         }
+    }
+
+    /// Container context of a block while a footnote definition or alert is open: depths
+    /// count only containers inside the innermost definition (definitions render at the end
+    /// of the document), the outermost quote's alert, and the definition the block is in.
+    /// Returns the innermost item (-1: none).
+    @inline(never)
+    func specialContext(_ b: inout PendingBlock, _ q: inout UInt8, _ l: inout UInt8) -> Int {
+        var item = -1, firstQuote = 0, note: Int32 = -1
+        for k in 0..<stack.count {
+            let kind = stack[k].kind
+            if kind == .quote {
+                if q == 0 { firstQuote = k }
+                q += 1
+            } else if kind == .item {
+                l += 1; item = k
+            } else {
+                q = 0; l = 0; item = -1
+                note = stack[k].number
+            }
+        }
+        if q > 0 { b.alert = stack[firstQuote].alert }
+        if note >= 0 { noteOf.append(Int32(blocks.count)); noteOf.append(note) }
+        return item
+    }
+
+    /// An item closed without content still draws its marker.
+    @inline(never)
+    func emitEmptyItem(_ c: Container) {
+        var b = PendingBlock(kind: .paragraph)
+        b.lineStart = Int32(lines.count >> 1)
+        b.lineCount = 0
+        var q: UInt8 = 0, l: UInt8 = 0
+        if openSpecial == 0 {
+            for k in 0..<stack.count { if stack[k].kind == .quote { q += 1 } else { l += 1 } }
+        } else {
+            _ = specialContext(&b, &q, &l)
+        }
+        b.quoteDepth = q
+        b.listDepth = l + 1
+        b.list = c.list
+        b.firstInItem = true
+        b.marker = c.task != .none ? c.task : (c.ordered ? .ordered : .bullet)
+        b.markerNumber = c.number
+        lists[Int(c.list)].lastBlock = Int32(blocks.count)
+        blocks.append(b)
     }
 
     /// Content in an item after a blank line inside it makes the list loose.
@@ -655,6 +724,73 @@ final class BlockParser {
     }
 
     // MARK: - Block recognizers
+
+    /// `[^label]:` at `at` (a label has no whitespace or `]`, as in GFM): the label range and
+    /// where the definition's content starts (after the spaces following the colon).
+    func footnoteStart(_ at: Int, _ le: Int) -> (Int, Int, Int)? {
+        guard at + 3 < le, p[at] == 0x5B, p[at + 1] == 0x5E else { return nil }
+        var k = at + 2
+        while k < le, case let c = p[k], c != 0x5D, c != 0x20, c != 0x09 { k += 1 }
+        guard k > at + 2, k + 1 < le, p[k] == 0x5D, p[k + 1] == 0x3A else { return nil }
+        var c = k + 2
+        while c < le && (p[c] == 0x20 || p[c] == 0x09) { c += 1 }
+        return (at + 2, k, c)
+    }
+
+    /// The quote just opened is an alert if the rest of its line is a marker: emits the title.
+    @inline(never)
+    func openAlert(_ pos: Int, _ le: Int) -> Bool {
+        guard outermostQuote() == stack.count - 1, let type = alertMarker(pos, le) else { return false }
+        stack[stack.count - 1].alert = type
+        openSpecial += 1
+        emitLeaf(.alertTitle)
+        lastLineBlank = false
+        return true
+    }
+
+    /// Opens a footnote definition container at `at`: where its content starts, or nil if this
+    /// isn't a definition. Containers from `closeFrom` up are closed first (-1: none).
+    @inline(never)
+    func openFootnote(_ at: Int, _ le: Int, closeFrom: Int) -> Int? {
+        guard let (ls, lend, content) = footnoteStart(at, le) else { return nil }
+        if closeFrom >= 0 { closeUnmatched(closeFrom) }
+        closeLeaf()
+        stack.append(Container(kind: .footnote, started: true, indent: 4, number: inline.defineFootnote(p + ls, lend - ls)))
+        openSpecial += 1
+        return content
+    }
+
+    /// Index of the outermost quote inside the innermost footnote definition, or -1.
+    func outermostQuote() -> Int {
+        var found = -1
+        for k in 0..<stack.count {
+            if stack[k].kind == .footnote { found = -1 } else if stack[k].kind == .quote && found < 0 { found = k }
+        }
+        return found
+    }
+
+    /// `[!NOTE]` (TIP, IMPORTANT, WARNING, CAUTION; any case) alone on the rest of the line.
+    func alertMarker(_ pos: Int, _ le: Int) -> MDAlert? {
+        var s = pos
+        while s < le && (p[s] == 0x20 || p[s] == 0x09) { s += 1 }
+        guard s + 2 < le, p[s] == 0x5B, p[s + 1] == 0x21 else { return nil }
+        var e = s + 2
+        while e < le && p[e] != 0x5D { e += 1 }
+        guard e < le else { return nil }
+        var t = e + 1
+        while t < le && (p[t] == 0x20 || p[t] == 0x09) { t += 1 }
+        guard t == le else { return nil }
+        let w = p + s + 2
+        let type: MDAlert?
+        switch e - (s + 2) {
+        case 3: type = BlockParser.lowerEquals(w, "tip") ? .tip : nil
+        case 4: type = BlockParser.lowerEquals(w, "note") ? .note : nil
+        case 7: type = BlockParser.lowerEquals(w, "warning") ? .warning : BlockParser.lowerEquals(w, "caution") ? .caution : nil
+        case 9: type = BlockParser.lowerEquals(w, "important") ? .important : nil
+        default: type = nil
+        }
+        return type
+    }
 
     func isThematicBreak(_ at: Int, _ le: Int) -> Bool {
         let c = p[at]

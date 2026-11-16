@@ -13,6 +13,10 @@ public final class MarkdownDocument: @unchecked Sendable {
     public var images: MDImages
     public var tables: [MDTable] = []
     public var headings: [MDHeading] = []
+    /// First block of each footnote (index = number - 1); footnotes follow the main text.
+    public var footnoteBlocks: [Int] = []
+    /// Text offsets of each footnote's references (index = number - 1), for back-links.
+    public var footnoteRefs: [[Int32]] = []
 
     init(text: TextBuffer, strings: TextBuffer, links: [StrRange], images: [MDImageSpec]) {
         self.text = text
@@ -63,7 +67,7 @@ public enum MDBlockKind: UInt8, Sendable, BitwiseCopyable {
     case rule
     case table        // `table` indexes `tables`
     case html         // raw HTML rendered as its text content
-    case footnote     // footnote definition body (rendered at the end)
+    case alertTitle   // GitHub alert title ("Note", "Warning"): the alert type is in `alert`
 }
 
 /// One leaf block. Containers it sits in are described by `quoteDepth` and `list*` fields.
@@ -74,10 +78,14 @@ public struct MDBlock: Sendable {
     public var listDepth: UInt8 = 0        // number of enclosing list items
     /// Marker to draw for this block, set only on the first block of a list item.
     public var marker: MDMarker = .none
+    /// GitHub alert of the outermost enclosing quote.
+    public var alert: MDAlert = .none
     public var markerNumber: Int32 = 0     // for ordered lists
     /// No vertical space before this block (tight list items).
     public var tight = false
     public var align: MDAlign = .left      // from <p align=...>
+    /// Number of the footnote this block belongs to (footnotes section), 0 = main text.
+    public var footnote: Int16 = 0
     public var textStart: Int32 = 0
     public var textEnd: Int32 = 0
     public var runStart: Int32 = 0
@@ -87,6 +95,22 @@ public struct MDBlock: Sendable {
     public var table: Int32 = -1
     /// Index in `headings` for heading blocks.
     public var heading: Int32 = -1
+}
+
+/// GitHub alert types (`> [!NOTE]` ...).
+public enum MDAlert: UInt8, Sendable, BitwiseCopyable {
+    case none, note, tip, important, warning, caution
+
+    public var title: String {
+        switch self {
+        case .none: ""
+        case .note: "Note"
+        case .tip: "Tip"
+        case .important: "Important"
+        case .warning: "Warning"
+        case .caution: "Caution"
+        }
+    }
 }
 
 public enum MDMarker: UInt8, Sendable, BitwiseCopyable {

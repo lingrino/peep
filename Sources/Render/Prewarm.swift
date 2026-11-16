@@ -19,7 +19,7 @@ public enum Prewarm {
             lang.lex(sample.base, 0, sample.count, TokenStream(expectedBytes: sample.count))
         }
         // Markdown: parser statics, and Core Text shaping in the body/heading/code fonts.
-        _ = MarkdownParser.parse(TextBuffer("# T\n\nA *b* **c** `d` [e](f) &amp;\n\n- g\n\n| h |\n|---|\n| i |\n\n<div align=\"center\"><img src=\"x\"></div>\n"))
+        _ = MarkdownParser.parse(TextBuffer("# T\n\nA *b* **c** `d` [e](f) &amp; :tada:[^1]\n\n- g\n\n| h |\n|---|\n| i |\n\n<div align=\"center\"><img src=\"x\"></div>\n\n> [!NOTE]\n> j\n\n[^1]: k\n"))
         let m = MDMetrics()
         for (size, weight) in [(m.body, NSFont.Weight.regular), (m.body, .semibold), (m.headingSize(1), .semibold),
                                (m.headingSize(2), .semibold), (m.headingSize(3), .semibold)] {
