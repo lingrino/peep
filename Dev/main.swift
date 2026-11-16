@@ -16,6 +16,7 @@ func render(_ args: [String]) {
     var scrollY: CGFloat = 0
     var select: (Int, Int)?
     var find: String?
+    var wait = 0.0
     var i = 2
     while i < args.count {
         switch args[i] {
@@ -30,6 +31,7 @@ func render(_ args: [String]) {
             let p = args[i].split(separator: ":").compactMap { Int($0) }
             select = (p[0], p[1])
         case "--find": i += 1; find = args[i]
+        case "--wait": i += 1; wait = Double(args[i]) ?? 0
         default: print("unknown option \(args[i])"); exit(2)
         }
         i += 1
@@ -41,6 +43,8 @@ func render(_ args: [String]) {
     let t0 = nanotime()
     let doc = Document.open(path: path)
     view.show(doc)
+    view.layoutSubtreeIfNeeded()
+    if wait > 0 { RunLoop.main.run(until: Date(timeIntervalSinceNow: wait)); view.layoutSubtreeIfNeeded() }
     if scrollY > 0 { view.documentView.scrollToTop(y: scrollY) }
     if let s = select { view.documentView.select(s.0, s.1) }
     if let f = find { view.find(f) }
@@ -110,6 +114,21 @@ func lexbench(_ args: [String]) {
     print("\(lang.name): \(count) tokens, best \(String(format: "%.3f", Double(best) / 1e6))ms = \(String(format: "%.0f", Double(text.count) / Double(best) * 1e3)) MB/s; lines \(lc) in \(String(format: "%.3f", Double(lineNs) / 1e6))ms")
 }
 
+/// Dump markdown layout (blocks, boxes) for debugging.
+@MainActor
+func layoutDump(_ args: [String]) {
+    let d = Document.open(path: args[0])
+    guard let md = d.content as? MarkdownContent else { print("not markdown"); return }
+    _ = md.layout(width: Double(args.count > 1 ? args[1] : "800") ?? 800)
+    for (i, b) in md.doc.blocks.enumerated() {
+        let lb = md.blocks[i]
+        let t = md.doc.text.string(Int(b.textStart), min(Int(b.textEnd), Int(b.textStart) + 40))
+        print(i, b.kind, "q\(b.quoteDepth) l\(b.listDepth)", String(format: "y=%.0f h=%.0f", lb.y, lb.h), "boxes \(lb.box0)+\(lb.boxN)",
+              (lb.box0..<(lb.box0 + lb.boxN)).map { k in let r = md.boxes[k].rect; return String(format: "[%.0f,%.0f %.0fx%.0f lines %d]", r.minX, r.minY, r.width, r.height, md.boxes[k].lines.count) }.joined(),
+              String(reflecting: t))
+    }
+}
+
 @MainActor
 func tokens(_ args: [String]) {
     let d = Document.open(path: args[0])
@@ -129,6 +148,7 @@ MainActor.assumeIsolated {
     case "bench": bench(Array(args.dropFirst()))
     case "tokens": tokens(Array(args.dropFirst()))
     case "lexbench": lexbench(Array(args.dropFirst()))
+    case "layout": layoutDump(Array(args.dropFirst()))
     default: print("unknown command"); exit(2)
     }
 }

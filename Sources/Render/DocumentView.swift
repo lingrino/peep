@@ -28,11 +28,18 @@ public protocol DocumentContent: AnyObject {
     func copyText(_ start: Int, _ end: Int) -> String
     /// Link target at a point, if any.
     func link(at point: CGPoint) -> String?
+    /// Appearance changed. Return true if the content re-laid out (colors baked into layout).
+    func setPalette(_ p: Palette) -> Bool
+    /// Y of a named anchor (markdown heading slug), for in-document links.
+    func anchorY(_ name: String) -> CGFloat?
 }
 
 extension DocumentContent {
     public func copyText(_ start: Int, _ end: Int) -> String { text.string(start, end) }
+    public func drawGutter(_ ctx: CGContext, rect: CGRect, palette: Palette) {}
     public func link(at point: CGPoint) -> String? { nil }
+    public func setPalette(_ p: Palette) -> Bool { false }
+    public func anchorY(_ name: String) -> CGFloat? { nil }
 }
 
 /// Selection and find state handed to the content's draw call.
@@ -117,6 +124,8 @@ public final class DocumentView: NSView {
     public func setContent(_ c: DocumentContent, width: CGFloat) {
         content = c
         anchor = 0; head = 0
+        palette = Palette.current(for: self)
+        _ = c.setPalette(palette)
         _ = c.layout(width: max(100, width - c.gutterWidth))
         resize()
         for t in tiles { t.removeFromSuperview() }
@@ -135,6 +144,13 @@ public final class DocumentView: NSView {
         updateTiles()
     }
 
+    /// The content re-laid out on its own (e.g. images arrived): resize and repaint.
+    public func contentDidChangeLayout() {
+        resize()
+        updateTiles()
+        invalidateAll()
+    }
+
     /// Re-runs layout for the current viewport width (markdown rewraps; code is unaffected).
     func relayout() {
         guard let c = content, let sv = scrollView else { return }
@@ -144,11 +160,16 @@ public final class DocumentView: NSView {
         }
     }
 
-    private func resize() {
+    func resize() {
         guard let c = content else { return }
         let vis = scrollView?.contentView.bounds.size ?? bounds.size
         let w = max(vis.width, c.size.width + c.gutterWidth)
         let h = max(vis.height, c.size.height)
+        if w != bounds.width || h != bounds.height {
+            // Tile frames depend on the document size: re-place (and redraw) all of them.
+            for t in tiles { t.row = -1; t.col = -1 }
+            for t in gutterTiles { t.row = -1; t.col = -1 }
+        }
         setFrameSize(NSSize(width: w, height: h))
         gutterView.frame = NSRect(x: 0, y: 0, width: c.gutterWidth, height: h)
         gutterView.isHidden = c.gutterWidth == 0
@@ -251,16 +272,20 @@ public final class DocumentView: NSView {
 
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        let p = Palette.current(for: self)
-        if p !== palette {
-            palette = p
-            invalidateAll()
-        }
+        applyPalette()
     }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        palette = Palette.current(for: self)
+        applyPalette()
+    }
+
+    private func applyPalette() {
+        let p = Palette.current(for: self)
+        if p === palette { return }
+        palette = p
+        if content?.setPalette(p) == true { resize() }
+        invalidateAll()
     }
 
     // MARK: - Selection

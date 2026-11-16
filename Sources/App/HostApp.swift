@@ -283,7 +283,7 @@ final class ViewerWindow: NSWindow {
         representedURL = URL(fileURLWithPath: path)
         isReleasedWhenClosed = false
         contentView = preview
-        preview.documentView.onLink = { s in
+        preview.onExternalLink = { s in
             if let u = URL(string: s), u.scheme != nil { NSWorkspace.shared.open(u) }
         }
         preview.show(Document.open(path: path))

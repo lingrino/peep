@@ -7,6 +7,10 @@ public final class PreviewView: NSView {
     public let documentView = DocumentView(frame: .zero)
     public private(set) var document: Document?
     private var lastWidth: CGFloat = 0
+    private var outline: OutlineView?
+    /// Links that leave the document (http, mailto, other files). In-document anchors are
+    /// handled here.
+    public var onExternalLink: ((String) -> Void)?
 
     public override var isFlipped: Bool { true }
 
@@ -29,12 +33,14 @@ public final class PreviewView: NSView {
         NotificationCenter.default.addObserver(self, selector: #selector(clipFrameChanged),
                                                name: NSView.frameDidChangeNotification, object: scrollView.contentView)
         addSubview(scrollView)
+        documentView.onLink = { [weak self] l in self?.handleLink(l) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     @objc private func clipBoundsChanged() {
         documentView.updateTiles()
+        updateOutlineCurrent()
     }
 
     @objc private func clipFrameChanged() {
@@ -48,13 +54,62 @@ public final class PreviewView: NSView {
 
     public override func layout() {
         super.layout()
-        scrollView.frame = bounds
+        let showOutline = outline != nil && bounds.width >= 780
+        if let o = outline {
+            o.isHidden = !showOutline
+            o.frame = NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height)
+        }
+        scrollView.frame = showOutline ? NSRect(x: OutlineView.width, y: 0, width: bounds.width - OutlineView.width, height: bounds.height) : bounds
         if isFinding { positionFindBar() }
+    }
+
+    private func updateOutlineCurrent() {
+        guard let o = outline, !o.isHidden, let md = document?.content as? MarkdownContent else { return }
+        let top = scrollView.contentView.bounds.minY + 40
+        var cur = -1
+        for (i, y) in md.headingY.enumerated() where y <= top { cur = i }
+        o.setCurrent(heading: max(0, cur))
+    }
+
+    private func handleLink(_ l: String) {
+        if l.hasPrefix("#") {
+            if let y = document?.content.anchorY(l) { documentView.scrollToTop(y: y - 12) }
+            return
+        }
+        if let u = URL(string: l), u.scheme != nil { onExternalLink?(l); return }
+        // Relative path: resolve against the document's directory.
+        guard let path = document?.path else { return }
+        var rel = l
+        var fragment = ""
+        if let h = rel.firstIndex(of: "#") { fragment = String(rel[h...]); rel = String(rel[..<h]) }
+        if rel.isEmpty { handleLink(fragment); return }
+        let base = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let target = base.appendingPathComponent(rel.removingPercentEncoding ?? rel).standardizedFileURL
+        onExternalLink?(target.absoluteString)
     }
 
     public func show(_ doc: Document) {
         document = doc
         doc.onUpdate = { [weak self] in self?.documentView.invalidateAll() }
+        outline?.removeFromSuperview()
+        outline = nil
+        if let md = doc.content as? MarkdownContent {
+            md.onNeedsLayout = { [weak self, weak md] in
+                md?.relayout()
+                self?.documentView.contentDidChangeLayout()
+            }
+            if md.doc.headings.count >= 3 {
+                let o = OutlineView(frame: NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height))
+                o.setHeadings(md.doc.headings)
+                o.onSelect = { [weak self, weak md] i in
+                    guard let md, i < md.headingY.count else { return }
+                    self?.documentView.scrollToTop(y: md.headingY[i] - 12)
+                }
+                addSubview(o, positioned: .below, relativeTo: scrollView)
+                outline = o
+            }
+            needsLayout = true
+        }
         documentView.onSelectionChange = { [weak self] in self?.onStateChange?() }
         if isFinding { closeFind() }
         layoutSubtreeIfNeeded()

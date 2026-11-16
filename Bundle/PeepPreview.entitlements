@@ -6,7 +6,8 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
-	<!-- The keyboard agent's XPC service (Sources/App/Agent.swift). -->
+	<!-- The keyboard agent's XPC service (Sources/App/Agent.swift). It also fetches remote
+	     images: Quick Look's sandbox denies outbound connections even with network.client. -->
 	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
 	<array>
 		<string>com.lingrino.peep.agent</string>
@@ -16,8 +17,5 @@
 	<array>
 		<string>/</string>
 	</array>
-	<!-- Markdown: remote images. -->
-	<key>com.apple.security.network.client</key>
-	<true/>
 </dict>
 </plist>

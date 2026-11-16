@@ -14,6 +14,7 @@ public final class Document {
     public let fileSize: Int
     public let truncated: Bool
     public var timings: [(String, UInt64)] = []
+    public var path: String?
 
     init(kind: Kind, content: DocumentContent, fileSize: Int, truncated: Bool) {
         self.kind = kind
@@ -51,6 +52,15 @@ public final class Document {
         let head = UnsafeBufferPointer(start: text.base, count: min(text.count, 512))
         let lang = Language.detect(fileName: name, head: head)
         mark("detect")
+        if lang == .markdown {
+            let md = MarkdownParser.parse(text)
+            mark("parse")
+            let content = MarkdownContent(doc: md, baseDir: URL(fileURLWithPath: path).deletingLastPathComponent())
+            let doc = Document(kind: .markdown, content: content, fileSize: file.fileSize, truncated: file.truncated)
+            doc.timings = times
+            doc.path = path
+            return doc
+        }
         let lines = LineIndex(text)
         mark("lines")
         // Big files: lex a prefix now (first paint cost independent of file size) and the
@@ -64,6 +74,7 @@ public final class Document {
         mark("content")
         let doc = Document(kind: .code(lang), content: content, fileSize: file.fileSize, truncated: file.truncated)
         doc.timings = times
+        doc.path = path
         if prefixEnd < text.count {
             DispatchQueue.global(qos: .userInitiated).async {
                 let t0 = nanotime()

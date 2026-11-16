@@ -14,13 +14,14 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
     private var reportedSize = CGSize.zero
 
     override func loadView() {
+        ImageStore.remoteFetch = { url, done in AgentClient.shared.fetch(url, done) }
         preview = PreviewView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         view = preview
         agentID = AgentClient.shared.register { [weak self] code, chars, mods in
             self?.preview.handleKey(code: code, chars: chars, mods: mods)
         }
         preview.onStateChange = { [weak self] in self?.report() }
-        preview.documentView.onLink = { url in AgentClient.shared.open(url) }
+        preview.onExternalLink = { url in AgentClient.shared.open(url) }
     }
 
     override func viewDidAppear() {

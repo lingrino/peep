@@ -15,6 +15,7 @@ import os
 /// Wire protocol (XPC dictionaries, key "t" = message type):
 ///   extension -> agent  "state": id, w, h, visible, find, sel, matches
 ///                       "open":  url        (open a link; sandboxed extensions can't)
+///                       "fetch": url -> reply {data} (remote images; QL's sandbox blocks network)
 ///   agent -> extension  "key":   id, code, chars, mods
 enum Agent {
     static let label = "com.lingrino.peep.agent"
@@ -47,6 +48,11 @@ final class AgentCore {
     }
 
     private var listener: xpc_connection_t?
+    nonisolated static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.httpMaximumConnectionsPerHost = 6
+        return URLSession(configuration: c)
+    }()
     private var previews: [Preview] = []
     private var tap: CFMachPort?
     private var panelCache: (pid: pid_t, at: UInt64, rect: CGRect?) = (0, 0, nil)
@@ -103,6 +109,21 @@ final class AgentCore {
             } else if p.visible {
                 previews.append(p)
             }
+        case "fetch":
+            guard let s = xpc_dictionary_get_string(msg, "url"), let url = URL(string: String(cString: s)),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  let reply = xpc_dictionary_create_reply(msg) else { return }
+            nonisolated(unsafe) let r = reply
+            nonisolated(unsafe) let peerConn = peer
+            var req = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 15)
+            req.setValue("Peep (Quick Look)", forHTTPHeaderField: "User-Agent")
+            AgentCore.session.dataTask(with: req) { data, resp, _ in
+                let ok = (resp as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+                if ok, let data, data.count <= 25 << 20 {
+                    data.withUnsafeBytes { xpc_dictionary_set_data(r, "data", $0.baseAddress!, data.count) }
+                }
+                xpc_connection_send_message(peerConn, r)
+            }.resume()
         case "open":
             if let s = xpc_dictionary_get_string(msg, "url"), let url = URL(string: String(cString: s)),
                ["http", "https", "mailto", "file"].contains(url.scheme?.lowercased() ?? "") {

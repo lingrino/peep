@@ -43,6 +43,21 @@ final class AgentClient {
         xpc_connection_send_message(connection(), m)
     }
 
+    /// Fetches a remote resource through the agent (the extension's sandbox has no network).
+    func fetch(_ url: URL, _ done: @escaping @MainActor (Data?) -> Void) {
+        let m = xpc_dictionary_create(nil, nil, 0)
+        xpc_dictionary_set_string(m, "t", "fetch")
+        xpc_dictionary_set_string(m, "url", url.absoluteString)
+        xpc_connection_send_message_with_reply(connection(), m, DispatchQueue.main) { reply in
+            var data: Data?
+            if xpc_get_type(reply) == XPC_TYPE_DICTIONARY {
+                var len = 0
+                if let p = xpc_dictionary_get_data(reply, "data", &len), len > 0 { data = Data(bytes: p, count: len) }
+            }
+            MainActor.assumeIsolated { done(data) }
+        }
+    }
+
     func open(_ url: String) {
         let m = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(m, "t", "open")

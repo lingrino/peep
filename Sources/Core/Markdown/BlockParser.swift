@@ -219,7 +219,9 @@ final class BlockParser {
                 }
                 continue
             }
-            if let item = listMarker(at, le, col: col + ind, interruptsParagraph: leaf == .paragraph && allMatched && !opened) {
+            if var item = listMarker(at, le, col: col + ind, interruptsParagraph: leaf == .paragraph && allMatched && !opened) {
+                // Continuation indent is relative to where this container's prefix starts.
+                item.indent -= col
                 // A thematic break that looks like a bullet (`- - -`) is a break.
                 if isThematicBreak(at, le) { break }
                 if !opened { closeUnmatched(matched); opened = true }
