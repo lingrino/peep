@@ -10,8 +10,8 @@ import CoreText
 ///    combining marks, bidi). Hit testing and selection use the same CTLine.
 @MainActor
 public final class CodeContent: DocumentContent {
-    public let text: TextBuffer
-    public let lines: LineIndex
+    public private(set) var text: TextBuffer
+    public private(set) var lines: LineIndex
     public private(set) var tokens: TokenStream?
     let typo: Typography
     public let language: Language
@@ -31,8 +31,10 @@ public final class CodeContent: DocumentContent {
     nonisolated(unsafe) private var positions: UnsafeMutablePointer<CGPoint>
     private var scratchCap = 4096
 
+    /// `lineCountHint`: the line count the gutter must fit when `replace` will swap in a
+    /// longer text later (progressive formatting), so the gutter doesn't change width.
     public init(text: TextBuffer, lines: LineIndex, tokens: TokenStream?, language: Language,
-                typography: Typography = .standard, lineNumbers: Bool = true) {
+                typography: Typography = .standard, lineNumbers: Bool = true, lineCountHint: Int = 0) {
         self.text = text
         self.lines = lines
         self.tokens = tokens
@@ -41,7 +43,7 @@ public final class CodeContent: DocumentContent {
         glyphs = .allocate(capacity: scratchCap)
         positions = .allocate(capacity: scratchCap)
         var digits = 2
-        var n = lines.count
+        var n = max(lines.count, lineCountHint)
         while n >= 100 { digits += 1; n /= 10 }
         gutterWidth = lineNumbers ? (gutterPadLeft + CGFloat(digits) * typography.mono.advance + gutterPadRight).rounded(.up) : 0
         size = CGSize(width: (padX * 2 + CGFloat(lines.maxColumns) * typo.mono.advance).rounded(.up),
@@ -54,6 +56,16 @@ public final class CodeContent: DocumentContent {
     }
 
     public func setTokens(_ t: TokenStream) { tokens = t }
+
+    /// Swaps in a complete text whose beginning matches the current one (the background half
+    /// of progressive formatting). The caller relayouts the view.
+    public func replace(text t: TextBuffer, lines l: LineIndex, tokens tk: TokenStream) {
+        text = t
+        lines = l
+        tokens = tk
+        size = CGSize(width: (padX * 2 + CGFloat(l.maxColumns) * typo.mono.advance).rounded(.up),
+                      height: padY * 2 + CGFloat(l.count) * typo.lineHeight)
+    }
 
     public func layout(width: CGFloat) -> Bool { false }
 

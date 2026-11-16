@@ -67,12 +67,34 @@ public final class Document {
             }
         }
         mark("detect")
+        // Minified JSON is re-indented for display (formats that allow comments or are
+        // line-structured are left alone).
+        var formatted = false
+        var unformatted: TextBuffer?   // set when only a prefix was formatted (rest in background)
+        if lang == .json && !Document.noReformat.contains((path as NSString).pathExtension.lowercased())
+            && JSONFormatter.looksMinified(text) {
+            formatted = true
+            if text.count > progressiveThreshold {
+                // First screens now; the whole file in the background (formatting runs at
+                // ~0.9 GB/s: 72 ms for 64 MB is too long to wait for). Cut after a comma.
+                var cut = min(text.count, progressivePrefix)
+                var c = cut
+                while c > cut - 4096 && c > 1 && text.base[c - 1] != 0x2C { c -= 1 }
+                if text.base[c - 1] == 0x2C { cut = c }
+                unformatted = text
+                text = JSONFormatter.format(text, count: cut)
+            } else {
+                text = JSONFormatter.format(text)
+            }
+            mark("format")
+        }
         var notice: String?
         if lang == .hexdump && file.fileSize > HexDump.limit {
             notice = "First \(byteCount(HexDump.limit)) of \(byteCount(file.fileSize))"
         } else if file.truncated {
             notice = "\(file.offset > 0 ? "Last" : "First") \(byteCount(file.raw.count)) of \(byteCount(file.fileSize))"
         }
+        if formatted { notice = notice.map { "Formatted · " + $0 } ?? "Formatted from minified JSON" }
         if lang == .markdown {
             let md = MarkdownParser.parse(text)
             mark("parse")
@@ -85,6 +107,34 @@ public final class Document {
         }
         let lines = LineIndex(text)
         mark("lines")
+        if let raw = unformatted {
+            // Prefix is under the progressive threshold: lex it whole, now.
+            let tokens = TokenStream(expectedBytes: text.count)
+            lang.lex(text.base, 0, text.count, tokens)
+            mark("lex")
+            let estimate = lines.count * (raw.count / max(1, text.count) + 1) * 2
+            let content = CodeContent(text: text, lines: lines, tokens: tokens, language: lang, typography: typography,
+                                      lineNumbers: true, lineCountHint: estimate)
+            let doc = Document(kind: .code(lang), content: content, fileSize: file.fileSize, truncated: file.truncated)
+            doc.timings = times
+            doc.path = path
+            doc.notice = notice
+            let lang = lang
+            DispatchQueue.global(qos: .userInitiated).async {
+                let t0 = nanotime()
+                let full = JSONFormatter.format(raw)
+                let fullLines = LineIndex(full)
+                let fullTokens = TokenStream(expectedBytes: full.count)
+                lang.lex(full.base, 0, full.count, fullTokens)
+                let ns = nanotime() - t0
+                DispatchQueue.main.async {
+                    content.replace(text: full, lines: fullLines, tokens: fullTokens)
+                    doc.timings.append(("format-bg", ns))
+                    doc.onContentReplaced?()
+                }
+            }
+            return doc
+        }
         // Big files: lex a prefix now (first paint cost independent of file size) and the
         // whole file on a background P-core; tokens are swapped in when ready.
         let prefixEnd = text.count <= progressiveThreshold ? text.count
@@ -117,12 +167,19 @@ public final class Document {
         return doc
     }
 
+    /// JSON-family extensions never re-indented: comments (jsonc, json5, editor settings) or
+    /// one document per line (jsonl, ndjson).
+    static let noReformat: Set<String> = ["jsonc", "json5", "jsonl", "ndjson", "code-workspace",
+                                          "sublime-settings", "sublime-project"]
+
     /// Files above this size are lexed progressively (prefix now, rest in background).
     static let progressiveThreshold = 1 << 20
     static let progressivePrefix = 256 << 10
 
     /// Called on the main thread when background work changes what should be drawn.
     public var onUpdate: (() -> Void)?
+    /// Called on the main thread when the content's text was replaced (sizes changed).
+    public var onContentReplaced: (() -> Void)?
 
     /// Binary property lists (bplist00) shown as their XML form.
     static func binaryPlistAsXML(_ raw: TextBuffer) -> TextBuffer? {

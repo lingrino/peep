@@ -100,6 +100,11 @@ public final class PreviewView: NSView {
     public func show(_ doc: Document) {
         document = doc
         doc.onUpdate = { [weak self] in self?.documentView.invalidateAll() }
+        doc.onContentReplaced = { [weak self] in
+            guard let self else { return }
+            self.documentView.contentDidChangeLayout()
+            if self.isFinding { _ = self.find(self.findBar.queryString) }   // offsets past the old end
+        }
         outline?.removeFromSuperview()
         outline = nil
         if let md = doc.content as? MarkdownContent {

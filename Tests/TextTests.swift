@@ -139,4 +139,15 @@ let searchTests: [Test] = [
             }
         }
     },
+    Test("json: minified input is re-indented") {
+        func f(_ s: String) -> String { let t = JSONFormatter.format(TextBuffer(s)); return t.string(0, t.count) }
+        expectEqual(f(#"{"a":[1,2,{}],"b":"x,{\"y"}"#), "{\n  \"a\": [\n    1,\n    2,\n    {}\n  ],\n  \"b\": \"x,{\\\"y\"\n}\n")
+        expectEqual(f("[ ]"), "[]\n")
+        expectEqual(f(#"{"a":1}{"b":2}"#), "{\n  \"a\": 1\n}\n{\n  \"b\": 2\n}\n")
+        expectEqual(f("]]}{ garbage, \"unterminated"), "]\n]\n}\n{\n  garbage,\n  \"unterminated\n")
+        let deep = String(repeating: "[", count: 200) + String(repeating: "]", count: 200)
+        expect(f(deep).utf8.count < 40_000)   // indentation is capped (uncapped: ~80 KB)
+        expect(JSONFormatter.looksMinified(TextBuffer(String(repeating: #"{"k":"value"},"#, count: 100))))
+        expect(!JSONFormatter.looksMinified(TextBuffer(String(repeating: "{\n  \"k\": 1\n},\n", count: 100))))
+    },
 ]
