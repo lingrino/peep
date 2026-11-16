@@ -136,10 +136,26 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 - `CTLineDraw` advances `ctx.textPosition`; reset it after, or the next glyph-table line draws
   offset.
 - Markdown layout is progressive: blocks are laid out synchronously until the viewport (+160
-  pt) is covered, the rest get estimated heights and are laid out in parallel in the
-  background, then the whole list is re-stacked. Consequences:
-  - Anything that re-stacks must place boxes *absolutely* (`TextBox.place(top:)`); relative
-    translation drew the prefix at 2× its y once background layout landed (this shipped).
+  pt) is covered, the rest get estimated heights; a background pass measures them in
+  parallel and swaps in exact heights (`restack`: positions only, O(blocks), no Core Text).
+  Core Text frames exist only for blocks that are drawn or queried (`placed(k)` builds and
+  places one), and are dropped again far from the viewport (`evictFar`). The background pass
+  keeps heights only: keeping a 10 MB document laid out whole was ~800 MB of frames per
+  preview (two previews: 1.6 GB), freeing them stalled the main thread 0.2–0.35 s whenever
+  the preview moved on, and Quick Look showed the preview only once the pass finished
+  (~500 ms after prepare). Consequences:
+  - Boxes are placed *absolutely* (`TextBox.place(top:)`); relative translation drew the
+    prefix at 2× its y once background layout landed (this shipped).
+  - Background jobs run on one process-wide `LayoutPool` (P-cores − 2 threads, newest job
+    first, default QoS). Finder's column preview and the Space panel each lay out their own
+    copy; a thread set per job (20 threads on 16 cores) starved Quick Look's own work in the
+    process and the panel appeared only when the column pane's job ended. Utility QoS is
+    throttled (1.6 s instead of 0.4 for 10 MB). Jobs are cancelled when their content goes
+    away (re-layout, `isolated deinit`) and claim small chunks dynamically (a static stride
+    left efficiency-core threads finishing last).
+  - Past ~10 threads Core Text's glyph-storage retain/release lock caps throughput; and every
+    attribute value shared by all threads (one palette `CGColor`) made atomic refcounts
+    contend: books keep their own color instances.
   - Exact geometry below the prefix needs `finishLayout()` (anchors, find reveal, outline
     clicks). When the *visible* rect reaches an estimated region, `willShow` lays out just the
     next blocks in order on the main thread (extending the exact prefix); it used to call
@@ -148,6 +164,9 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
     Never pass the tile margin to `willShow`: that silently made first paint lay out everything.
   - The background job starts *after* the first frame: its threads hold Core Text's per-font
     shaping lock, and a first draw competing with them was 5× slower.
+  - Drawing skips blocks whose height is still an estimate (their tiles are redrawn when it
+    is exact); draw also includes the block just below the rect (quote bars reach up into the
+    gap above their block).
   - Layout threads each use their own `FontBook` (`main`, `workers[w]`). Core Text serializes
     OpenType shaping per font *face* (every size/weight of `NSFont.systemFont` shares one lock),
     so threads on the system fonts ran one at a time. Books make their fonts from the font
@@ -155,7 +174,8 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
     layout is identical: renders match pixel for pixel). Then Foundation's process-wide
     attribute-dictionary uniquing lock was next: books keep per-style dictionaries uniqued
     once, set per run with `CFAttributedStringSetAttributes` (no per-link attribute: links are
-    found by text offset, `linkRef`). Background layout of a 10 MB document: 1,245 -> 346 ms.
+    found by text offset, `linkRef`). Background layout of a 10 MB document: 1,245 -> 346 ms
+    (frames kept); measuring only, with frames freed on the workers: ~400 ms, flat memory.
 - First-paint budget is measured with `peep-dev firstpaint`, not guessed. `NSVisualEffectView`
   cost ~14 ms there (CPU compositing in `renderInContext`); use plain colors unless something
   is actually behind the view.

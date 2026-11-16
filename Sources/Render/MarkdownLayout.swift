@@ -1,5 +1,6 @@
 import AppKit
 import CoreText
+import Synchronization
 import os
 
 /// Markdown block layout, run in parallel across blocks.
@@ -56,11 +57,22 @@ final class FontBook: @unchecked Sendable {
     private var fonts: [Int: NSFont] = [:]
     private var attrs: [AttrKey: CFDictionary] = [:]
     private var paragraphStyles: [Int: NSParagraphStyle] = [:]
+    private var colors: [ObjectIdentifier: CGColor] = [:]
 
     /// Main-thread layout (synchronous prefix, on-demand blocks, list markers).
     static let main = FontBook()
     /// Background layout: one book per concurrent worker (`PendingLayout.run`).
-    static let workers = (0..<max(1, ProcessInfo.processInfo.activeProcessorCount)).map { _ in FontBook() }
+    /// Performance cores less two: past ~10 threads Core Text's own locks (glyph storage
+    /// retain/release) stop throughput from growing (10 MB document: 8 threads 475 ms, 10
+    /// 456, 12 463, 16 501), and the spare cores keep Quick Look's panel animation smooth.
+    static let workers: [FontBook] = {
+        var p: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.perflevel0.physicalcpu", &p, &size, nil, 0) != 0 || p <= 0 {
+            p = Int32(ProcessInfo.processInfo.activeProcessorCount)
+        }
+        return (0..<max(4, Int(p) - 2)).map { _ in FontBook() }
+    }()
 
     func font(_ size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false, mono: Bool = false) -> NSFont {
         let key = Int(size * 4) << 8 | Int((weight.rawValue + 1) * 10) << 2 | (italic ? 2 : 0) | (mono ? 1 : 0)
@@ -93,7 +105,7 @@ final class FontBook: @unchecked Sendable {
         os_unfair_lock_lock(&lock)
         if let d = attrs[key] { os_unfair_lock_unlock(&lock); return d }
         os_unfair_lock_unlock(&lock)
-        var a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: paragraphStyle(paragraph)]
+        var a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ownColor(color), .paragraphStyle: paragraphStyle(paragraph)]
         if flags & AttrFlag.inlineCode != 0 { a[MDAttr.inlineCode] = true }
         if flags & AttrFlag.kbd != 0 { a[MDAttr.kbd] = true }
         if flags & AttrFlag.strike != 0 { a[MDAttr.strike] = true }
@@ -105,6 +117,19 @@ final class FontBook: @unchecked Sendable {
         attrs[key] = d
         os_unfair_lock_unlock(&lock)
         return d
+    }
+
+    /// This book's own instance of a palette color. Core Text retains and releases every
+    /// attribute value per run, as it builds and frees lines; one color object shared by all
+    /// layout threads made those atomic refcount updates contend (38% of background layout
+    /// in CFRetain/CFRelease on a 10 MB document).
+    private func ownColor(_ c: CGColor) -> CGColor {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        if let o = colors[ObjectIdentifier(c)] { return o }
+        guard let cs = c.colorSpace, let comps = c.components, let o = CGColor(colorSpace: cs, components: comps) else { return c }
+        colors[ObjectIdentifier(c)] = o
+        return o
     }
 
     /// Paragraph style keys: alignment and line height multiple for text, or `codeParagraph`.
@@ -214,51 +239,161 @@ struct BlockLayout: @unchecked Sendable {
     var right: CGFloat = 0
 }
 
-/// Background layout of the blocks after the synchronous prefix.
+/// Background pass over the blocks after the synchronous prefix: lays each one out to
+/// measure it and keeps only its height (frames are rebuilt on demand for what is shown).
+/// Run in chunks by `LayoutPool`.
 final class PendingLayout: @unchecked Sendable {
     let first: Int
     let count: Int
-    let x0: CGFloat
     let env: LayoutEnv
-    private(set) var results: [BlockLayout] = []
+    /// Blocks per chunk: small (~5-10 ms), so cancellation and a newer job taking the
+    /// threads over are prompt.
+    let chunk: Int
+    let chunks: Int
+    private let hs: UnsafeMutableBufferPointer<CGFloat>
+    private let rs: UnsafeMutableBufferPointer<CGFloat>
+    /// Heights and right edges of blocks `first...`; complete once the job is done.
+    var heights: UnsafeBufferPointer<CGFloat> { UnsafeBufferPointer(hs) }
+    var rights: UnsafeBufferPointer<CGFloat> { UnsafeBufferPointer(rs) }
     private let done = DispatchGroup()
-    /// Whether `run` has been called or scheduled (main thread only).
+    /// Whether the job was handed to the pool (main thread only).
     var started = false
+    /// Called on a pool thread once every chunk is measured (not when cancelled).
+    var onDone: (@Sendable () -> Void)?
+    // Pool bookkeeping, under the pool's lock.
+    fileprivate var claimed = 0
+    fileprivate var measured = 0
+    fileprivate var isComplete = false
+    private let stop = Atomic<Bool>(false)
+    private weak var owner: AnyObject?
 
-    init(first: Int, count: Int, x0: CGFloat, env: LayoutEnv) {
+    init(first: Int, count: Int, env: LayoutEnv, owner: AnyObject) {
         self.first = first
         self.count = count
-        self.x0 = x0
         self.env = env
+        self.owner = owner
+        chunk = max(8, min(128, count / 48))
+        chunks = (count + chunk - 1) / chunk
+        hs = .allocate(capacity: count)
+        hs.initialize(repeating: 0)
+        rs = .allocate(capacity: count)
+        rs.initialize(repeating: 0)
         done.enter()
     }
 
-    func run() {
-        let env = self.env
-        let buf = UnsafeMutableBufferPointer<BlockLayout>.allocate(capacity: count)
-        nonisolated(unsafe) let base = buf.baseAddress!
-        let chunk = max(8, count / 48)
-        let chunks = (count + chunk - 1) / chunk
-        let first = self.first, count = self.count
-        // One worker per font book (a book is used by one thread at a time); worker w takes
-        // every `workers`-th chunk.
-        let workers = min(FontBook.workers.count, chunks)
-        DispatchQueue.concurrentPerform(iterations: workers) { w in
-            var e = env
-            e.fonts = FontBook.workers[w]
-            for c in stride(from: w, to: chunks, by: workers) {
-                for i in (c * chunk)..<min(count, (c + 1) * chunk) {
-                    (base + i).initialize(to: MarkdownLayout.block(first + i, e))
-                }
-            }
+    deinit {
+        hs.deallocate()
+        rs.deallocate()
+    }
+
+    /// Stops handing out chunks: the content was re-laid out or went away.
+    fileprivate func cancel() { stop.store(true, ordering: .relaxed) }
+    fileprivate var cancelled: Bool { stop.load(ordering: .relaxed) || owner == nil }
+
+    fileprivate func measure(_ c: Int, _ fonts: FontBook) {
+        var e = env
+        e.fonts = fonts
+        for i in (c * chunk)..<min(count, (c + 1) * chunk) {
+            let l = MarkdownLayout.block(first + i, e)
+            hs[i] = l.height
+            rs[i] = l.right
         }
-        results = Array(buf)
-        _ = buf.deinitialize()
-        buf.deallocate()
+    }
+
+    fileprivate func complete() {
+        if !cancelled { onDone?() }
+        onDone = nil
         done.leave()
     }
 
+    /// Blocks until every chunk is measured (or the job was cancelled).
     func wait() { done.wait() }
+}
+
+/// Runs background layout jobs on a fixed set of threads (one `FontBook` each), newest job
+/// first. Finder's column preview and the Space panel lay out their own copies of a
+/// document; with a thread set per job (20 threads on 16 cores) the panel appeared only when
+/// the column pane's job finished, ~300 ms after its preview was ready: Quick Look's own work
+/// in this process was starved. For the same reason the threads run at default QoS, below
+/// user-initiated work (as fast here: 10 MB document 383-408 ms either way; utility QoS
+/// threads are throttled: 1.6 s).
+final class LayoutPool: @unchecked Sendable {
+    static let shared = LayoutPool()
+    private var lock = os_unfair_lock()
+    private var jobs: [PendingLayout] = []   // newest last
+    private var busy = [Bool](repeating: false, count: FontBook.workers.count)
+
+    func submit(_ job: PendingLayout) {
+        job.started = true
+        var start: [Int] = []
+        os_unfair_lock_lock(&lock)
+        jobs.append(job)
+        for w in busy.indices where !busy[w] {
+            busy[w] = true
+            start.append(w)
+        }
+        os_unfair_lock_unlock(&lock)
+        for w in start { DispatchQueue.global(qos: .default).async { self.work(w) } }
+    }
+
+    /// Makes `job` the next one served (something waits for it).
+    func prioritize(_ job: PendingLayout) {
+        os_unfair_lock_lock(&lock)
+        if let i = jobs.firstIndex(where: { $0 === job }) { jobs.append(jobs.remove(at: i)) }
+        os_unfair_lock_unlock(&lock)
+    }
+
+    func cancel(_ job: PendingLayout) {
+        job.cancel()
+        os_unfair_lock_lock(&lock)
+        let finish = drop(job)
+        os_unfair_lock_unlock(&lock)
+        if finish { job.complete() }
+    }
+
+    /// Removes a job from the queue; true when it has nothing in flight and must complete
+    /// now (lock held).
+    private func drop(_ job: PendingLayout) -> Bool {
+        if let i = jobs.firstIndex(where: { $0 === job }) { jobs.remove(at: i) }
+        guard !job.isComplete, job.measured == job.claimed else { return false }
+        job.isComplete = true
+        return true
+    }
+
+    private func work(_ w: Int) {
+        let fonts = FontBook.workers[w]
+        var finished: [PendingLayout] = []
+        while true {
+            var job: PendingLayout?
+            var c = 0
+            os_unfair_lock_lock(&lock)
+            while let j = jobs.last {
+                if j.cancelled {
+                    if drop(j) { finished.append(j) }
+                    continue
+                }
+                c = j.claimed
+                j.claimed += 1
+                if j.claimed == j.chunks { jobs.removeLast() }
+                job = j
+                break
+            }
+            if job == nil { busy[w] = false }
+            os_unfair_lock_unlock(&lock)
+            for j in finished { j.complete() }
+            finished.removeAll()
+            guard let job else { return }
+
+            job.measure(c, fonts)
+
+            os_unfair_lock_lock(&lock)
+            job.measured += 1
+            let last = !job.isComplete && job.measured == job.claimed && (job.claimed == job.chunks || job.cancelled)
+            if last { job.isComplete = true }
+            os_unfair_lock_unlock(&lock)
+            if last { job.complete() }
+        }
+    }
 }
 
 enum MarkdownLayout {

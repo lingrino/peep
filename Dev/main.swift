@@ -482,8 +482,9 @@ func layoutDump(_ args: [String]) {
     for (i, b) in md.doc.blocks.enumerated() {
         let lb = md.blocks[i]
         let t = md.doc.text.string(Int(b.textStart), min(Int(b.textEnd), Int(b.textStart) + 40))
-        print(i, b.kind, "q\(b.quoteDepth) l\(b.listDepth)", String(format: "y=%.0f h=%.0f", lb.y, lb.h), "boxes \(lb.box0)+\(lb.boxN)",
-              (lb.box0..<(lb.box0 + lb.boxN)).map { k in let r = md.boxes[k].rect; return String(format: "[%.0f,%.0f %.0fx%.0f lines %d]", r.minX, r.minY, r.width, r.height, md.boxes[k].lines.count) }.joined(),
+        let boxes = md.boxes(ofBlock: i)
+        print(i, b.kind, "q\(b.quoteDepth) l\(b.listDepth)", String(format: "y=%.0f h=%.0f", lb.y, lb.h), "boxes \(boxes.count)",
+              boxes.map { box in let r = box.rect; return String(format: "[%.0f,%.0f %.0fx%.0f lines %d]", r.minX, r.minY, r.width, r.height, box.lines.count) }.joined(),
               String(reflecting: t))
     }
 }
@@ -745,10 +746,15 @@ func symbolsDump(_ args: [String]) {
 @MainActor
 func mdGeometryErrors(_ md: MarkdownContent) -> [String] {
     var out: [String] = []
-    for (k, b) in md.boxes.enumerated() {
-        for y in b.baselines where y < b.rect.minY - 1 || y > b.rect.maxY + 1 {
-            out.append(String(format: "box %d baseline %.0f outside %.0f..%.0f", k, y, b.rect.minY, b.rect.maxY))
-            break
+    for i in md.blocks.indices {
+        for (k, b) in md.boxes(ofBlock: i).enumerated() {
+            for y in b.baselines where y < b.rect.minY - 1 || y > b.rect.maxY + 1 {
+                out.append(String(format: "block %d box %d baseline %.0f outside %.0f..%.0f", i, k, y, b.rect.minY, b.rect.maxY))
+                break
+            }
+            if b.rect.minY < md.blocks[i].y - 0.5 || b.rect.maxY > md.blocks[i].y + md.blocks[i].h + 1 {
+                out.append(String(format: "block %d box %d outside its block", i, k))
+            }
         }
     }
     for i in md.blocks.indices.dropLast() where md.blocks[i].y + md.blocks[i].h > md.blocks[i + 1].y + 0.5 {

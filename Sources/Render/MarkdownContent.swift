@@ -21,22 +21,44 @@ public final class MarkdownContent: DocumentContent {
     let m = MDMetrics()
     let fonts = FontBook.main
 
+    /// Vertical geometry of one block. Kept for every block; cheap (no Core Text objects).
     struct LBlock {
-        var y: CGFloat
-        var h: CGFloat
-        var box0: Int
-        var boxN: Int
+        var y: CGFloat        // top, content space
+        var h: CGFloat        // exact for blocks below `exactCount`, else an estimate
+        var gap: CGFloat      // space above the block (0 for the first)
+        var right: CGFloat    // rightmost content x
+    }
+
+    /// A block's Core Text layout (boxes placed at `top`, decorations in content space).
+    /// Built only for blocks that are drawn or queried, and dropped again far from the
+    /// viewport: keeping a 10 MB document laid out whole took ~800 MB of frames, and freeing
+    /// them stalled the main thread 0.2-0.35 s whenever the preview moved on.
+    struct Built: @unchecked Sendable {
+        var layout: BlockLayout   // boxes placed absolutely, decos block-local
+        var top: CGFloat          // where `layout` and `decos` are placed (NaN: not yet)
+        var decos: [PlacedDeco]   // the block's decorations plus list marker and quote bars
     }
 
     private(set) var blocks: [LBlock] = []
-    private(set) var boxes: [TextBox] = []
-    private var decos: [PlacedDeco] = []
+    private var built: [Built?] = []
+    /// Indices of the built blocks (eviction).
+    private var builtList: [Int] = []
     private(set) var headingY: [CGFloat] = []
     private var headingHeight: [CGFloat] = []
+    /// Block index of each heading (`doc.headings` order).
+    private lazy var headingBlock: [Int] = {
+        var out = [Int](repeating: -1, count: doc.headings.count)
+        for (bi, b) in doc.blocks.enumerated() where b.kind == .heading && b.heading >= 0 { out[Int(b.heading)] = bi }
+        return out
+    }()
     public private(set) var lastLayoutNanos: UInt64 = 0
 
     /// Called when async work (images) needs a relayout.
     public var onNeedsLayout: (() -> Void)?
+
+    isolated deinit {
+        if let p = pending { LayoutPool.shared.cancel(p) }
+    }
 
     public init(doc: MarkdownDocument, baseDir: URL?) {
         self.doc = doc
@@ -62,61 +84,62 @@ public final class MarkdownContent: DocumentContent {
 
     // MARK: - Layout
 
-    /// Progressive layout: blocks are laid out synchronously until ~two screens of content
-    /// exist (first paint never waits for the whole document), the rest get estimated
-    /// heights, and a background pass lays out everything in parallel and swaps it in.
-    /// Queries that need exact geometry below the fold call `finishLayout()`.
+    /// Progressive layout. Blocks are laid out synchronously until the viewport is covered
+    /// (first paint never waits for the whole document); the rest get estimated heights. A
+    /// background pass then measures every remaining block in parallel and swaps in the exact
+    /// heights: it keeps only heights, so geometry is exact everywhere while Core Text frames
+    /// exist only for blocks near what was shown (`placed`). Queries that need exact geometry
+    /// below the laid-out prefix call `finishLayout()`.
     func relayout() {
         let t0 = nanotime()
         images.start()
         generation &+= 1
+        if let p = pending { LayoutPool.shared.cancel(p) }
+        pending = nil
         let contentW = min(m.maxWidth, max(200, width - 2 * m.padX))
         let x0 = max(m.padX, ((width - contentW) / 2).rounded())
         let env = LayoutEnv(doc: doc, palette: palette, m: m, fonts: fonts,
                             imageSizes: images.sizes(maxWidth: max(40, contentW)), x0: x0, contentW: contentW)
+        layoutEnv = env
         let n = doc.blocks.count
-        var results = [BlockLayout]()
-        results.reserveCapacity(n)
+        dropBuilt()
+        built = [Built?](repeating: nil, count: n)
+        var bl = [LBlock]()
+        bl.reserveCapacity(n)
+        for k in 0..<n { bl.append(LBlock(y: 0, h: 0, gap: gapAbove(k), right: x0 + contentW)) }
         var y: CGFloat = 0
         var k = 0
         while k < n && y < syncHeight {
             let r = MarkdownLayout.block(k, env)
-            y += r.height + m.gap
-            results.append(r)
+            bl[k].h = r.height
+            bl[k].right = r.right
+            y += bl[k].gap + r.height
+            built[k] = Built(layout: r, top: .nan, decos: [])
+            builtList.append(k)
             k += 1
         }
-        layoutEnv = env
-        if k == n {
-            pending = nil
-            exactCount = n
-            stack(results, x0: x0)
-            lastLayoutNanos = nanotime() - t0
-            renderLog.debug("md layout w=\(self.width) all \(n) blocks \(Double(self.lastLayoutNanos) / 1e6)ms")
-            return
-        }
-        for i in k..<n { results.append(MarkdownLayout.estimate(i, env)) }
-        layouts = results
         exactCount = k
-        stack(results, x0: x0)
+        for i in k..<n { bl[i].h = MarkdownLayout.estimate(i, env).height }
+        blocks = bl
+        restack()
         lastLayoutNanos = nanotime() - t0
         renderLog.debug("md layout w=\(self.width) sync \(k)/\(n) blocks \(Double(self.lastLayoutNanos) / 1e6)ms")
+        if k == n { return }
 
-        // Background: everything after the prefix, in parallel -- started after this main
-        // thread turn, i.e. after the first frame is drawn. The layout threads hold Core
+        // Background: measure everything after the prefix, in parallel -- started after this
+        // main thread turn, i.e. after the first frame is drawn. The layout threads hold Core
         // Text's per-font shaping lock most of the time; a first draw competing with them took
         // 21ms instead of ~3ms (900 KB changelog).
-        let job = PendingLayout(first: k, count: n - k, x0: x0, env: env)
+        let job = PendingLayout(first: k, count: n - k, env: env, owner: self)
         pending = job
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.start(job) } }
     }
 
     private func start(_ job: PendingLayout) {
         guard pending === job, !job.started else { return }
-        job.started = true
         let gen = generation
         let t0 = nanotime()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            job.run()
+        job.onDone = { [weak self] in
             let ran = nanotime() - t0
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -130,6 +153,7 @@ public final class MarkdownContent: DocumentContent {
                 }
             }
         }
+        LayoutPool.shared.submit(job)
     }
 
     /// Content laid out synchronously before first paint (points): the viewport plus a
@@ -147,37 +171,48 @@ public final class MarkdownContent: DocumentContent {
     /// Called after background layout lands (resize + repaint, no relayout).
     public var onLayoutChanged: (() -> Void)?
 
-    /// Current per-block layouts while background layout is pending: exact for the first
-    /// `exactCount` blocks, estimates after. The env lays out more blocks on demand.
-    private var layouts: [BlockLayout] = []
+    /// Blocks `0..<exactCount` have exact heights (all of them once background layout landed);
+    /// the rest are estimates.
     private var exactCount = 0
     private var layoutEnv: LayoutEnv?
 
     /// The visible rect reached estimated geometry: lay out just enough more blocks (in order,
     /// on this thread) to cover it, instead of waiting for the whole background job. Waiting
     /// stalled Quick Look's panel 0.5-2.5 s on a 10 MB document when it opened taller than
-    /// the preview was prepared at. The job keeps running; its results replace these.
+    /// the preview was prepared at. The job keeps running; its heights fill in the rest.
     public func willShow(_ rect: CGRect) {
-        guard pending != nil, exactCount < blocks.count, rect.maxY > blocks[exactCount].y,
-              let env = layoutEnv else { return }
-        let target = rect.maxY + 160
-        var y = blocks[exactCount].y   // exact: everything above it is laid out
-        var k = exactCount
-        while k < layouts.count && y < target {
-            let r = MarkdownLayout.block(k, env)
-            layouts[k] = r
-            y += r.height + m.gap
-            k += 1
+        let n = blocks.count
+        if exactCount < n, let env = layoutEnv, rect.maxY > blocks[exactCount].y - blocks[exactCount].gap {
+            let target = rect.maxY + 160
+            // Far into estimated geometry (a scroller drag): the parallel pass beats laying
+            // out thousands of blocks here one by one.
+            if firstBlock(atOrBelow: target) - exactCount > 1000 {
+                finishLayout()
+            } else {
+                var k = exactCount
+                var y = blocks[k].y - blocks[k].gap   // bottom of the exact prefix
+                while k < n && y < target {
+                    let r = MarkdownLayout.block(k, env)
+                    blocks[k].h = r.height
+                    blocks[k].right = r.right
+                    y += blocks[k].gap + r.height
+                    if built[k] == nil { builtList.append(k) }
+                    built[k] = Built(layout: r, top: .nan, decos: [])
+                    k += 1
+                }
+                exactCount = k
+                restack()
+                onLayoutChanged?()
+            }
         }
-        exactCount = k
-        stack(layouts, x0: env.x0)
-        onLayoutChanged?()
+        evictFar(from: rect)
     }
 
     /// Blocks until background layout is done and adopts it (exact geometry everywhere).
     public func finishLayout() {
         guard let job = pending else { return }
-        if job.started { job.wait() } else { job.started = true; job.run() }   // not started: run here, in parallel
+        if job.started { LayoutPool.shared.prioritize(job) } else { start(job) }
+        job.wait()
         adopt(job)
         onLayoutChanged?()
     }
@@ -185,95 +220,154 @@ public final class MarkdownContent: DocumentContent {
     private func adopt(_ job: PendingLayout) {
         guard pending === job else { return }
         pending = nil
-        var all = Array(layouts[0..<job.first])
-        all.append(contentsOf: job.results)
-        layouts = []
-        exactCount = all.count
-        stack(all, x0: job.x0)
+        // Blocks laid out here meanwhile (willShow) keep their own heights: identical, but the
+        // boxes already built from them must match their block exactly.
+        let hs = job.heights, rs = job.rights
+        for k in max(job.first, exactCount)..<blocks.count {
+            blocks[k].h = hs[k - job.first]
+            blocks[k].right = rs[k - job.first]
+        }
+        exactCount = blocks.count
+        restack()
     }
 
-    /// Places laid-out blocks vertically and adds the decorations that depend on neighbors.
-    private func stack(_ results: [BlockLayout], x0: CGFloat) {
-        blocks.removeAll(keepingCapacity: true)
-        boxes.removeAll(keepingCapacity: true)
-        decos.removeAll(keepingCapacity: true)
-        headingY = [CGFloat](repeating: 0, count: doc.headings.count)
-        headingHeight = headingY
-        var y = m.padTop
-        var maxRight = x0
-        var prevQuote: UInt8 = 0
-        var prevAlert = MDAlert.none
-        for (bi, b) in doc.blocks.enumerated() {
-            let r = results[bi]
-            if bi > 0 {
-                var g = b.tight ? m.tightGap : m.gap
-                if b.kind == .heading { g = max(g, m.body * (b.level <= 2 ? 1.9 : 1.5)) }
-                if doc.blocks[bi - 1].kind == .alertTitle { g = m.body * 0.4 }   // title sits on its body
-                y += g
-            }
-            let top = y
-            let box0 = boxes.count
-            for box in r.boxes { box.place(top: top); boxes.append(box) }
-            for d in r.decos { decos.append(PlacedDeco(minY: d.minY + top, maxY: d.maxY + top, deco: d.deco.offset(top))) }
-            y = top + r.height
-            maxRight = max(maxRight, r.right)
-            if b.kind == .heading && b.heading >= 0 { headingY[Int(b.heading)] = top; headingHeight[Int(b.heading)] = r.height }
+    private func gapAbove(_ k: Int) -> CGFloat {
+        if k == 0 { return 0 }
+        let b = doc.blocks[k]
+        var g = b.tight ? m.tightGap : m.gap
+        if b.kind == .heading { g = max(g, m.body * (b.level <= 2 ? 1.9 : 1.5)) }
+        if doc.blocks[k - 1].kind == .alertTitle { g = m.body * 0.4 }   // title sits on its body
+        return g
+    }
 
-            // List marker beside the block's first line.
-            if b.marker != .none, let fb = r.firstBaseline {
-                let base = top + fb
-                let indent = CGFloat(b.quoteDepth) * m.quoteIndent + CGFloat(b.listDepth) * m.listIndent
-                let mx = x0 + indent - 8
-                switch b.marker {
-                case .bullet:
-                    decos.append(PlacedDeco(minY: base - m.body, maxY: base, deco: .bullet(CGPoint(x: mx - 4, y: base - m.body * 0.32), Int(b.listDepth))))
-                case .ordered:
-                    let l = CTLineCreateWithAttributedString(NSAttributedString(string: "\(b.markerNumber).", attributes: [
-                        .font: fonts.font(m.body), .foregroundColor: palette.secondaryText]))
-                    decos.append(PlacedDeco(minY: base - m.body, maxY: base + 4, deco: .label(l, CGPoint(x: mx, y: base))))
-                case .taskOpen, .taskDone:
-                    let s = m.body * 0.95
-                    decos.append(PlacedDeco(minY: base - s, maxY: base, deco: .check(CGRect(x: mx - s, y: base - s * 0.88, width: s, height: s), b.marker == .taskDone)))
-                case .none: break
-                }
+    /// Positions every block from the heights (O(blocks), no Core Text). Built blocks are
+    /// re-placed lazily (`placed`).
+    private func restack() {
+        var y = m.padTop
+        var maxRight = layoutEnv?.x0 ?? 0
+        blocks.withUnsafeMutableBufferPointer { bp in
+            for k in bp.indices {
+                y += bp[k].gap
+                bp[k].y = y
+                y += bp[k].h
+                maxRight = max(maxRight, bp[k].right)
             }
-            // Quote bars span the block and the gap above it when the previous block was quoted too.
-            if b.quoteDepth > 0 {
-                for q in 0..<Int(b.quoteDepth) {
-                    let qx = x0 + CGFloat(q) * m.quoteIndent
-                    // An alert's bar is its color, and doesn't join a neighboring quote's.
-                    let alert = q == 0 ? b.alert : .none
-                    let joins = q < Int(prevQuote) && bi > 0 && !(q == 0 && (b.kind == .alertTitle || b.alert != prevAlert))
-                    let from = joins ? top - (b.tight ? m.tightGap : m.gap) : top
-                    let role: DecoRole = alert == .none ? .border : .alert(alert)
-                    decos.append(PlacedDeco(minY: from, maxY: y, deco: .fill(CGRect(x: qx, y: from, width: 3, height: y - from), role, 0)))   // square: segments meet seamlessly
-                }
-            }
-            prevQuote = b.quoteDepth
-            prevAlert = b.alert
-            blocks.append(LBlock(y: top, h: y - top, box0: box0, boxN: boxes.count - box0))
         }
         size = CGSize(width: max(width, maxRight + m.padX), height: y + m.padTop * 1.5)
-        decos.sort { $0.minY < $1.minY }
+        headingY = headingBlock.map { $0 >= 0 ? blocks[$0].y : 0 }
+        headingHeight = headingBlock.map { $0 >= 0 ? blocks[$0].h : 0 }
+    }
+
+    /// Block `k`'s layout, built if needed and placed at its current top. Callers make sure
+    /// the block's geometry is exact (`k < exactCount`).
+    @discardableResult
+    private func placed(_ k: Int) -> Built {
+        if let b = built[k], b.top == blocks[k].y { return b }
+        let r: BlockLayout
+        if let b = built[k] { r = b.layout } else { r = MarkdownLayout.block(k, layoutEnv!); builtList.append(k) }
+        let b = place(r, k)
+        built[k] = b
+        return b
+    }
+
+    /// Places a block's layout at its top and adds the decorations that depend on neighbors.
+    private func place(_ r: BlockLayout, _ k: Int) -> Built {
+        let top = blocks[k].y
+        let y = top + r.height
+        for box in r.boxes { box.place(top: top) }
+        var decos = r.decos.map { PlacedDeco(minY: $0.minY + top, maxY: $0.maxY + top, deco: $0.deco.offset(top)) }
+        let b = doc.blocks[k]
+        let x0 = layoutEnv?.x0 ?? m.padX
+        // List marker beside the block's first line.
+        if b.marker != .none, let fb = r.firstBaseline {
+            let base = top + fb
+            let indent = CGFloat(b.quoteDepth) * m.quoteIndent + CGFloat(b.listDepth) * m.listIndent
+            let mx = x0 + indent - 8
+            switch b.marker {
+            case .bullet:
+                decos.append(PlacedDeco(minY: base - m.body, maxY: base, deco: .bullet(CGPoint(x: mx - 4, y: base - m.body * 0.32), Int(b.listDepth))))
+            case .ordered:
+                let l = CTLineCreateWithAttributedString(NSAttributedString(string: "\(b.markerNumber).", attributes: [
+                    .font: fonts.font(m.body), .foregroundColor: palette.secondaryText]))
+                decos.append(PlacedDeco(minY: base - m.body, maxY: base + 4, deco: .label(l, CGPoint(x: mx, y: base))))
+            case .taskOpen, .taskDone:
+                let s = m.body * 0.95
+                decos.append(PlacedDeco(minY: base - s, maxY: base, deco: .check(CGRect(x: mx - s, y: base - s * 0.88, width: s, height: s), b.marker == .taskDone)))
+            case .none: break
+            }
+        }
+        // Quote bars span the block and the gap above it when the previous block was quoted too.
+        if b.quoteDepth > 0 {
+            let prevQuote = k > 0 ? doc.blocks[k - 1].quoteDepth : 0
+            let prevAlert = k > 0 ? doc.blocks[k - 1].alert : .none
+            for q in 0..<Int(b.quoteDepth) {
+                let qx = x0 + CGFloat(q) * m.quoteIndent
+                // An alert's bar is its color, and doesn't join a neighboring quote's.
+                let alert = q == 0 ? b.alert : .none
+                let joins = q < Int(prevQuote) && k > 0 && !(q == 0 && (b.kind == .alertTitle || b.alert != prevAlert))
+                let from = joins ? top - (b.tight ? m.tightGap : m.gap) : top
+                let role: DecoRole = alert == .none ? .border : .alert(alert)
+                decos.append(PlacedDeco(minY: from, maxY: y, deco: .fill(CGRect(x: qx, y: from, width: 3, height: y - from), role, 0)))   // square: segments meet seamlessly
+            }
+        }
+        return Built(layout: r, top: top, decos: decos)
+    }
+
+    /// Drops built blocks far from the visible rect once many are built (find stepping or
+    /// scrolling through a long document builds one screen at a time).
+    private func evictFar(from vis: CGRect) {
+        guard builtList.count > 1500 else { return }
+        let reach = 4 * max(vis.height, 600)
+        let lo = vis.minY - reach, hi = vis.maxY + reach
+        var keep: [Int] = []
+        var trash: [Built] = []
+        for k in builtList {
+            if blocks[k].y + blocks[k].h >= lo && blocks[k].y <= hi { keep.append(k) }
+            else if let b = built[k] { trash.append(b); built[k] = nil }
+        }
+        builtList = keep
+        Self.release(trash)
+    }
+
+    private func dropBuilt() {
+        let old = built
+        built = []
+        builtList.removeAll()
+        Self.release(old)
+    }
+
+    /// Frees Core Text objects off the main thread (thousands of frames take tens of ms).
+    nonisolated private static func release<T: Sendable>(_ x: T) {
+        DispatchQueue.global(qos: .utility).async { withExtendedLifetime(x) {} }
+    }
+
+    /// Boxes of block `k` with exact geometry (debug tools).
+    func boxes(ofBlock k: Int) -> [TextBox] {
+        if k >= exactCount { finishLayout() }
+        return placed(k).layout.boxes
     }
 
     // MARK: - Drawing
 
     public func draw(_ ctx: CGContext, rect: CGRect, palette: Palette, highlights: Highlights) {
-        // Decorations (sorted by minY; skip those that end above the rect).
-        for d in decos {
-            if d.minY > rect.maxY { break }
-            if d.maxY < rect.minY { continue }
-            drawDeco(d.deco, ctx, palette)
-        }
-        // Text boxes of blocks intersecting the rect.
+        // Blocks intersecting the rect, plus those just below it: quote bars reach up into the
+        // gap above their block. Blocks with estimated geometry aren't drawn (their tiles are
+        // redrawn once it's exact).
         var bi = firstBlock(atOrBelow: rect.minY)
-        while bi < blocks.count && blocks[bi].y <= rect.maxY {
-            let b = blocks[bi]
-            for k in b.box0..<(b.box0 + b.boxN) {
-                boxes[k].draw(ctx, rect: rect, palette: palette, highlights: highlights, content: self)
+        var end = bi
+        while end < exactCount && blocks[end].y - blocks[end].gap <= rect.maxY { end += 1 }
+        guard bi < end else { return }
+        var list: [Built] = []
+        list.reserveCapacity(end - bi)
+        while bi < end { list.append(placed(bi)); bi += 1 }
+        // Decorations first (backgrounds, bars), then text.
+        for b in list {
+            for d in b.decos where d.maxY >= rect.minY && d.minY <= rect.maxY { drawDeco(d.deco, ctx, palette) }
+        }
+        for b in list {
+            for box in b.layout.boxes {
+                box.draw(ctx, rect: rect, palette: palette, highlights: highlights, content: self)
             }
-            bi += 1
         }
     }
 
@@ -429,31 +523,54 @@ public final class MarkdownContent: DocumentContent {
         return lo
     }
 
-    /// Box containing a text offset (boxes are in text order).
-    func box(containing o: Int) -> Int? {
-        var lo = 0, hi = boxes.count
+    /// Box containing a text offset: the first box ending at or after it (boxes and blocks
+    /// are in text order), with exact geometry.
+    func box(containing o: Int) -> TextBox? {
+        let n = blocks.count
+        let bs = doc.blocks
+        var lo = 0, hi = n
         while lo < hi {
             let mid = (lo + hi) >> 1
-            if boxes[mid].end < o { lo = mid + 1 } else { hi = mid }
+            if Int(bs[mid].textEnd) < o { lo = mid + 1 } else { hi = mid }
         }
-        return lo < boxes.count ? lo : (boxes.isEmpty ? nil : boxes.count - 1)
+        var k = lo
+        while k < n {
+            if k >= exactCount { finishLayout() }
+            for box in placed(k).layout.boxes where box.end >= o { return box }
+            k += 1
+        }
+        // Past the end: the last box.
+        k = n - 1
+        while k >= 0 {
+            if k >= exactCount { finishLayout() }
+            if let box = placed(k).layout.boxes.last { return box }
+            k -= 1
+        }
+        return nil
     }
 
     public func offset(at p: CGPoint) -> Int {
-        if boxes.isEmpty { return 0 }
+        let n = blocks.count
+        if n == 0 { return 0 }
         let bi = firstBlock(atOrBelow: p.y)
-        if bi >= blocks.count { return text.count }
-        let b = blocks[bi]
-        if b.boxN == 0 {
+        if bi >= n { return text.count }
+        if bi >= exactCount { return Int(doc.blocks[bi].textStart) }
+        let boxes = placed(bi).layout.boxes
+        if boxes.isEmpty {
             // Rule or empty block: snap to the next box.
-            return boxes.indices.first { boxes[$0].rect.minY >= b.y }.map { boxes[$0].start } ?? text.count
+            var k = bi + 1
+            while k < exactCount {
+                if let f = placed(k).layout.boxes.first { return f.start }
+                k += 1
+            }
+            return k < n ? Int(doc.blocks[k].textStart) : text.count
         }
-        if p.y < b.y { return boxes[b.box0].start }
+        if p.y < blocks[bi].y { return boxes[0].start }
         // Nearest box in the block (tables: the cell under the point).
-        var best = b.box0
+        var best = 0
         var bestD = CGFloat.infinity
-        for k in b.box0..<(b.box0 + b.boxN) {
-            let r = boxes[k].rect
+        for (k, box) in boxes.enumerated() {
+            let r = box.rect
             let dx = p.x < r.minX ? r.minX - p.x : p.x > r.maxX ? p.x - r.maxX : 0
             let dy = p.y < r.minY ? r.minY - p.y : p.y > r.maxY ? p.y - r.maxY : 0
             let d = dx + dy * 4
@@ -463,15 +580,14 @@ public final class MarkdownContent: DocumentContent {
     }
 
     public func rect(for start: Int, _ end: Int) -> CGRect {
-        if pending != nil && (box(containing: start).map { boxes[$0].end < start } ?? true) { finishLayout() }
-        guard let k = box(containing: start) else { return .zero }
-        return boxes[k].rect(for: start, end)
+        box(containing: start)?.rect(for: start, end) ?? .zero
     }
 
     public func verticalExtent(_ start: Int, _ end: Int) -> (CGFloat, CGFloat) {
-        guard let a = box(containing: start), let b = box(containing: max(start, end)) else { return (0, size.height) }
+        // The later box first: it may finish layout, which moves nothing above it.
+        guard let b = box(containing: max(start, end)), let a = box(containing: start) else { return (0, size.height) }
         // Table rows share a y-band: widen to the containing blocks.
-        let ya = boxes[a].rect.minY, yb = boxes[b].rect.maxY
+        let ya = a.rect.minY, yb = b.rect.maxY
         let ba = firstBlock(atOrBelow: ya), bb = firstBlock(atOrBelow: yb)
         let top = ba < blocks.count ? min(ya, blocks[ba].y) : ya
         let bottom = bb < blocks.count ? max(yb, blocks[bb].y + blocks[bb].h) : yb
@@ -495,8 +611,8 @@ public final class MarkdownContent: DocumentContent {
     }
 
     public func lineRange(at o: Int) -> (Int, Int) {
-        guard let k = box(containing: o) else { return (o, o) }
-        return (boxes[k].start, min(text.count, boxes[k].end + 1))
+        guard let box = box(containing: o) else { return (o, o) }
+        return (box.start, min(text.count, box.end + 1))
     }
 
     public func copyText(_ start: Int, _ end: Int) -> String {
@@ -515,10 +631,9 @@ public final class MarkdownContent: DocumentContent {
 
     public func link(at p: CGPoint) -> String? {
         let bi = firstBlock(atOrBelow: p.y)
-        guard bi < blocks.count else { return nil }
-        let b = blocks[bi]
-        for k in b.box0..<(b.box0 + b.boxN) where boxes[k].rect.insetBy(dx: -2, dy: -2).contains(p) {
-            if let off = boxes[k].characterOffset(at: p), let ref = linkRef(at: off) { return doc.links[ref] }
+        guard bi < exactCount else { return nil }
+        for box in placed(bi).layout.boxes where box.rect.insetBy(dx: -2, dy: -2).contains(p) {
+            if let off = box.characterOffset(at: p), let ref = linkRef(at: off) { return doc.links[ref] }
         }
         return nil
     }
@@ -567,8 +682,8 @@ public final class MarkdownContent: DocumentContent {
                   parts[1] <= doc.footnoteRefs[note - 1].count else { return nil }
             let off = Int(doc.footnoteRefs[note - 1][parts[1] - 1])
             // The line holding the reference.
-            guard let k = box(containing: off) else { return nil }
-            let r = boxes[k].rect(for: off, off + 1)
+            guard let box = box(containing: off) else { return nil }
+            let r = box.rect(for: off, off + 1)
             return (r.minY, r.height)
         }
         let key = n.removingPercentEncoding ?? n
