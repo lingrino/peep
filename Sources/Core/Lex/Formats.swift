@@ -320,16 +320,93 @@ public enum MarkupLexer {
                 let name = ne - ns
                 if name == 6 && matchesCI(p, ns, "script") {
                     let close = findCI(p, i, end, "</script")
-                    CLike.lex(Specs.javascript, p, i, close, out)
+                    // Vue/Svelte `<script lang="ts">`, JSON data blocks, else JavaScript.
+                    if attribute(p, ne, j, "lang", startsWith: "ts") || attribute(p, ne, j, "lang", startsWith: "typescript") {
+                        CLike.lex(Specs.typescript, p, i, close, out)
+                    } else if attribute(p, ne, j, "type", contains: "json") || attribute(p, ne, j, "type", startsWith: "importmap") {
+                        JSONLexer.lex(p, i, close, out)
+                    } else {
+                        CLike.lex(Specs.javascript, p, i, close, out)
+                    }
                     i = close
                 } else if name == 5 && matchesCI(p, ns, "style") {
                     let close = findCI(p, i, end, "</style")
-                    CSSLexer.lex(p, i, close, out, dialect: .css)
+                    let dialect: CSSLexer.Dialect = attribute(p, ne, j, "lang", startsWith: "scss") || attribute(p, ne, j, "lang", startsWith: "sass") ? .scss
+                        : attribute(p, ne, j, "lang", startsWith: "less") ? .less : .css
+                    CSSLexer.lex(p, i, close, out, dialect: dialect)
                     i = close
                 }
             }
         }
     }
+
+    /// The tag's attribute `name` (in `[from, to)`) has a quoted value starting with (or
+    /// containing) `value`, ASCII case-insensitively.
+    static func attribute(_ p: UnsafePointer<UInt8>, _ from: Int, _ to: Int, _ name: StaticString,
+                          startsWith value: StaticString? = nil, contains part: StaticString? = nil) -> Bool {
+        let n = name.utf8CodeUnitCount
+        var k = from
+        while k + n < to {
+            if matchesCI(p, k, name) && !cc.isIdent(p[k - 1]) && p[k + n] == 0x3D && (p[k + n + 1] == quote || p[k + n + 1] == apos) {
+                let q = p[k + n + 1], v = k + n + 2
+                var e = v
+                while e < to && p[e] != q { e += 1 }
+                if let value {
+                    let m = value.utf8CodeUnitCount
+                    if e - v >= m && matchesCI(p, v, value) && (e - v == m || !cc.isIdent(p[v + m])) { return true }
+                }
+                if let part {
+                    let m = part.utf8CodeUnitCount
+                    var a = v
+                    while a + m <= e { if matchesCI(p, a, part) { return true }; a += 1 }
+                }
+                return false
+            }
+            k += 1
+        }
+        return false
+    }
+}
+
+// MARK: - PHP
+
+/// PHP files are HTML with `<?php ... ?>` / `<?= ... ?>` code; a file (or a Markdown snippet)
+/// without any `<?` is all code.
+public enum PHPLexer {
+    public static func lex(_ p: UnsafePointer<UInt8>, _ start: Int, _ end: Int, _ out: TokenStream) {
+        var i = start
+        var first = true
+        while i < end {
+            guard let open = pair(p, i, end, 0x3C, 0x3F) else {   // `<?`
+                if first { CLike.lex(Specs.php, p, i, end, out) } else { MarkupLexer.lex(p, i, end, out, html: true) }
+                return
+            }
+            first = false
+            if open > i { MarkupLexer.lex(p, i, open, out, html: true) }
+            var code = open + 2
+            if MarkupLexer.matchesCI(p, code, "php") { code += 3 } else if p[code] == 0x3D { code += 1 }
+            out.add(open, code, .meta)
+            let codeEnd = pair(p, code, end, 0x3F, 0x3E) ?? end   // `?>`
+            CLike.lex(Specs.php, p, code, codeEnd, out)
+            if codeEnd < end { out.add(codeEnd, codeEnd + 2, .meta) }
+            i = min(codeEnd + 2, end)
+        }
+    }
+
+    /// Index of the two-byte sequence `a b` in `[i, end)`.
+    static func pair(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ a: UInt8, _ b: UInt8) -> Int? {
+        var j = i
+        while j < end {
+            let k = findAny(p, j, end, a, a, a, a)
+            if k + 1 >= end { return nil }
+            if p[k + 1] == b { return k }
+            j = k + 1
+        }
+        return nil
+    }
+}
+
+extension MarkupLexer {
 
     /// Index just past `needle` (or `end`).
     static func find(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ needle: StaticString) -> Int {
@@ -369,9 +446,10 @@ public enum MarkupLexer {
 public enum CSSLexer {
     public enum Dialect { case css, scss, less }
 
-    public static func lex(_ p: UnsafePointer<UInt8>, _ start: Int, _ end: Int, _ out: TokenStream, dialect: Dialect) {
+    /// `depth` 1: the text is a declaration list, as in a block (CSS-in-JS templates).
+    public static func lex(_ p: UnsafePointer<UInt8>, _ start: Int, _ end: Int, _ out: TokenStream, dialect: Dialect, depth startDepth: Int = 0) {
         var i = start
-        var depth = 0
+        var depth = startDepth
         var inValue = false   // after "prop:" until ';' or '}'
         while i < end {
             let b = p[i]
@@ -580,21 +658,40 @@ public enum ShellLexer {
         if tag == 0 { return i + 2 }
         if quotedTag && j < end { j &+= 1 }
         out.add(i, j, .meta)
+        // The rest of the opening line is commands: `cat <<EOF | grep x > out`.
+        let first = lineEnd(p, j, end)
+        if first > j { lex(p, j, first, out) }
         // Body: from next line until a line that is exactly the tag (leading tabs allowed).
-        var ls = lineEnd(p, j, end) + 1
-        let bodyStart = ls
+        // An unquoted tag expands `$var`, `${...}`, `$(...)` and backticks in the body.
+        var ls = first + 1
+        var seg = ls
         while ls < end {
             let le = lineEnd(p, ls, end)
             var s = ls
             while s < le && p[s] == 0x09 { s &+= 1 }
             if le - s == tag && memcmp(p + s, p + ts, tag) == 0 {
-                out.add(bodyStart, ls, .string)
+                out.add(seg, ls, .string)
                 out.add(s, le, .meta)
                 return le
             }
+            var k = ls
+            while !quotedTag && k < le {
+                let d = findAny(p, k, le, 0x24, backslash, 0x60, 0x24)
+                if d >= le { break }
+                if p[d] == backslash { k = d + 2; continue }
+                if p[d] == 0x60 {
+                    let e = min(findAny(p, d + 1, le, 0x60, 0x60, 0x60, 0x60) + 1, le)
+                    out.add(seg, d, .string); out.add(d, e, .escape); seg = e; k = e
+                    continue
+                }
+                out.add(seg, d, .string)
+                let e = dollar(p, d, end, out)
+                if e > d + 1 { seg = e }
+                k = max(e, d + 1)
+            }
             ls = le + 1
         }
-        out.add(bodyStart, end, .string)
+        out.add(seg, end, .string)
         return end
     }
 }

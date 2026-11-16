@@ -33,7 +33,8 @@ public enum Specs {
         s.swiftRawStrings = true
         s.atAttribute = true
         s.hashPreprocessor = true   // #if / #available / #selector
-        s.regexLiterals = false
+        s.regexLiterals = true      // `/re/` where an expression starts (not `/ ` or `/=`)
+        s.dialect = .swift          // and `#/re/#`
     }
 
     static let cKeywords = "auto break case const continue default do else enum extern for goto if inline register restrict return sizeof static switch typedef union volatile while _Alignas _Alignof _Atomic _Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local alignas alignof constexpr static_assert thread_local typeof"
@@ -41,14 +42,17 @@ public enum Specs {
 
     public static let c = CLikeSpec(keywords: KeywordTable([
         (K, cKeywords), (T, "struct"), (Y, cTypes), (C, "NULL true false nullptr"),
-    ])) { s in s.hashPreprocessor = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 1 }
+    ])) { s in s.hashPreprocessor = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 1; s.cStringPrefixes = true }
 
     public static let cpp = CLikeSpec(keywords: KeywordTable([
         (S, "operator"),
         (K, cKeywords + " catch co_await co_return co_yield concept consteval constinit const_cast decltype delete dynamic_cast explicit export final friend mutable namespace new noexcept override private protected public reinterpret_cast requires static_cast template throw try typeid typename using virtual and or not xor and_eq or_eq not_eq bitand bitor compl import module"),
         (T, "class struct"), (Y, cTypes + " char8_t char16_t char32_t auto"),
         (C, "NULL true false nullptr"), (B, "this std"),
-    ])) { s in s.hashPreprocessor = true; s.cppRawStrings = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 3 }
+    ])) { s in
+        s.hashPreprocessor = true; s.cppRawStrings = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 3
+        s.cStringPrefixes = true; s.numberJoiner = 0x27; s.dialect = .cpp   // 1'000'000, [[attributes]]
+    }
 
     public static let objc = CLikeSpec(keywords: KeywordTable([
         (K, cKeywords + " end property synthesize dynamic optional required class selector encode synchronized try catch finally throw autoreleasepool import package private public protected nonatomic atomic strong weak copy assign readonly readwrite nullable nonnull __block __weak __strong instancetype in out inout oneway bycopy byref"),
@@ -92,6 +96,7 @@ public enum Specs {
     ])) { s in
         s.nestedBlockComments = true; s.atAttribute = true; s.tripleQuotes = true
         s.interpolation = .dollarBrace; s.dollarIdentInterp = true; s.backtick = .identifier
+        s.singleQuote = .rustLifetimeOrChar   // 'c' chars, Scala 2 'symbols
     }
 
     public static let groovy = CLikeSpec(keywords: KeywordTable([
@@ -111,6 +116,7 @@ public enum Specs {
     ])) { s in
         s.atAttribute = true; s.tripleQuotes = true; s.singleQuote = .string
         s.interpolation = .dollarBrace; s.dollarIdentInterp = true
+        s.singleQuoteInterp = true; s.rawPrefix = true            // '$x' interpolates, r'raw'
         s.keywordlessDefinitionDepth = 2; s.arrowBodies = true   // `void f() {`, `int get() => x;`
     }
 
@@ -138,7 +144,7 @@ public enum Specs {
         (D, "fn"), (T, "struct enum union opaque error"),
         (Y, "i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f16 f32 f64 f80 f128 bool void noreturn type anyerror anyopaque comptime_int comptime_float c_int c_uint c_long c_ulong c_char"),
         (C, "true false null undefined"),
-    ])) { s in s.slashStar = false; s.chars = ByteClass(extraStart: "@") }
+    ])) { s in s.slashStar = false; s.chars = ByteClass(extraStart: "@"); s.dialect = .zig }   // \\multiline
 
     static let jsKeywords = "async await break case catch const continue debugger default delete do else export extends finally for from if import in instanceof let new of return static switch throw try typeof var void while with yield get set as"
     static let jsConstants = "true false null undefined NaN Infinity"
@@ -181,6 +187,7 @@ public enum Specs {
         s.singleQuote = .string; s.multilineStrings = true; s.interpolation = .hashBrace
         s.backtick = .command; s.atVariable = true; s.dollarVariable = true; s.symbols = true
         s.regexLiterals = true; s.chars = ByteClass(extraIdent: "?!")
+        s.dialect = .ruby   // %w[] %q() %r{}, heredocs, =begin/=end
     }
 
     public static let php = CLikeSpec(keywords: KeywordTable([
@@ -189,7 +196,9 @@ public enum Specs {
         (C, "true false null TRUE FALSE NULL"), (B, "this self parent"),
     ], caseInsensitive: false)) { s in
         s.hashComment = true; s.singleQuote = .string; s.multilineStrings = true
-        s.dollarVariable = true; s.interpolation = .none; s.atAttribute = false
+        s.dollarVariable = true; s.atAttribute = false
+        s.interpolation = .dollarBrace; s.dollarIdentInterp = true   // "$name {$x}" in double quotes
+        s.hashAttribute = true; s.dialect = .php                     // #[Attr], <<<heredoc
     }
 
     public static let perl = CLikeSpec(keywords: KeywordTable([
@@ -199,6 +208,8 @@ public enum Specs {
         s.slashSlash = false; s.slashStar = false; s.hashComment = true
         s.singleQuote = .string; s.multilineStrings = true; s.dollarVariable = true
         s.backtick = .command; s.regexLiterals = true; s.capitalizedTypes = false
+        s.interpolation = .dollarBrace; s.dollarIdentInterp = true; s.atVariable = true   // "$x", @list
+        s.dialect = .perl   // q// qw() m{} s{}{} tr///, heredocs, POD, %hash, $#array
     }
 
     public static let lua = CLikeSpec(keywords: KeywordTable([
@@ -225,6 +236,8 @@ public enum Specs {
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.hashComment = true; s.tripleQuotes = true
         s.interpolation = .dollarBrace; s.dollarIdentInterp = true; s.atAttribute = true; s.singleQuote = .char
+        s.dollarParenInterp = true; s.rawPrefix = true   // "$(x + 1)", r"regex"
+        s.dialect = .julia                               // #= nested =#, A' (transpose)
     }
 
     public static let sql = CLikeSpec(keywords: KeywordTable([
@@ -243,7 +256,8 @@ public enum Specs {
         (C, "True False Nothing Just Left Right"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.dashDashComment = true; s.haskellBlockComment = true
-        s.singleQuote = .none; s.chars = ByteClass(extraIdent: "'"); s.lineStart = .signature   // `name :: T`
+        s.chars = ByteClass(extraIdent: "'"); s.lineStart = .signature   // `name :: T`
+        s.singleQuote = .rustLifetimeOrChar   // 'c' chars; x' primes are part of names
     }
 
     public static let elm = CLikeSpec(keywords: KeywordTable([
@@ -260,8 +274,9 @@ public enum Specs {
         (T, "type module"),
         (C, "true false None Some"),
     ])) { s in
-        s.slashSlash = false; s.slashStar = false; s.ocamlBlockComment = true; s.singleQuote = .none
+        s.slashSlash = false; s.slashStar = false; s.ocamlBlockComment = true
         s.multilineStrings = true; s.chars = ByteClass(extraIdent: "'"); s.lineStartLet = true
+        s.singleQuote = .rustLifetimeOrChar; s.dialect = .ocaml   // 'c' chars, 'a type vars, {|quoted|}
     }
 
     public static let fsharp = CLikeSpec(keywords: KeywordTable([
@@ -280,7 +295,7 @@ public enum Specs {
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.hashComment = true; s.tripleQuotes = true
         s.singleQuote = .string; s.interpolation = .hashBrace; s.symbols = true; s.atAttribute = true
-        s.multilineStrings = true; s.chars = ByteClass(extraIdent: "?!")
+        s.multilineStrings = true; s.chars = ByteClass(extraIdent: "?!"); s.dialect = .elixir   // ~r/sigils/
     }
 
     public static let erlang = CLikeSpec(keywords: KeywordTable([
@@ -289,6 +304,7 @@ public enum Specs {
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.percentComment = true; s.singleQuote = .string
         s.capitalizedTypes = false; s.lineStart = .clause   // `name(Args) ->`
+        s.dialect = .erlang; s.numberJoiner = 0x23           // $c character codes, 16#FF
     }
 
     public static let nix = CLikeSpec(keywords: KeywordTable([
@@ -296,7 +312,7 @@ public enum Specs {
         (C, "true false null"), (B, "builtins"),
     ])) { s in
         s.slashSlash = false; s.hashComment = true; s.singleQuote = .none; s.multilineStrings = true
-        s.interpolation = .dollarBrace; s.chars = ByteClass(extraIdent: "-'")
+        s.interpolation = .dollarBrace; s.chars = ByteClass(extraIdent: "-'"); s.dialect = .nix   // ''indented''
     }
 
     public static let hcl = CLikeSpec(keywords: KeywordTable([
@@ -342,13 +358,17 @@ public enum Specs {
         (D, "function"), (T, "class struct interface union"),
         (Y, "bool byte ubyte short ushort int uint long ulong float double real char wchar dchar string void size_t"),
         (C, "true false null"), (B, "this"),
-    ])) { s in s.nestedBlockComments = true; s.backtick = .raw; s.keywordlessDefinitionDepth = 2 }
+    ])) { s in
+        s.nestedBlockComments = true; s.backtick = .raw; s.keywordlessDefinitionDepth = 2
+        s.rawPrefix = true; s.dialect = .d   // r"wysiwyg", /+ nested +/
+    }
 
     public static let nim = CLikeSpec(keywords: KeywordTable([
         (K, "addr and as asm bind block break case cast concept const continue defer discard distinct div do elif else end enum except export finally for from if import in include interface is isnot let mixin mod nil not notin object of or out ptr raise ref return shl shr static try tuple using var when while xor yield"),
         (D, "proc func method iterator template macro converter"), (T, "type"), (C, "true false nil"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.hashComment = true; s.tripleQuotes = true; s.singleQuote = .char
+        s.rawPrefix = true; s.numberJoiner = 0x27; s.dialect = .nim   // r"raw", 0x1F'i32, #[ nested ]#
     }
 
     public static let crystal = CLikeSpec(keywords: KeywordTable([
@@ -357,6 +377,7 @@ public enum Specs {
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.hashComment = true; s.interpolation = .hashBrace
         s.atVariable = true; s.symbols = true; s.chars = ByteClass(extraIdent: "?!")
+        s.dialect = .ruby   // Ruby's %w[] literals and heredocs
     }
 
     public static let powershell = CLikeSpec(keywords: KeywordTable([
@@ -366,6 +387,8 @@ public enum Specs {
         s.slashSlash = false; s.slashStar = false; s.hashComment = true; s.singleQuote = .string
         s.multilineStrings = true; s.dollarVariable = true; s.capitalizedTypes = false
         s.chars = ByteClass(extraIdent: "-")
+        s.interpolation = .dollarBrace; s.dollarIdentInterp = true; s.dollarParenInterp = true   // "$x $(expr)"
+        s.dialect = .powershell   // <# block comments #>
     }
 
     public static let vim = CLikeSpec(keywords: KeywordTable([
@@ -374,6 +397,7 @@ public enum Specs {
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.singleQuote = .string; s.capitalizedTypes = false
         s.chars = ByteClass(extraIdent: "!:#")   // `function!`, `s:name`, `a:arg`, `pkg#func`
+        s.dialect = .vim                          // `"` starting a line is a comment
     }
 
     public static let assembly = CLikeSpec(keywords: KeywordTable([

@@ -52,6 +52,7 @@ public enum Language: UInt8, CaseIterable, Sendable {
         case .dockerfile: DockerfileLexer.lex(p, start, end, out)
         case .markdown: MarkdownSourceLexer.lex(p, start, end, out)
         case .hexdump: HexDump.lex(p, start, end, out)
+        case .php: PHPLexer.lex(p, start, end, out)
         default: if let spec { CLike.lex(spec, p, start, end, out) }
         }
         out.finish(end)

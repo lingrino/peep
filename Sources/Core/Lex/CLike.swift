@@ -41,7 +41,21 @@ public final class CLikeSpec: @unchecked Sendable {
     public var rustStrings = false         // b"..", r"..", r#".."#, br".."
     public var swiftRawStrings = false     // #"..."#
     public var cppRawStrings = false       // R"delim(...)delim"
-    public var csharpStrings = false       // @"..", $"..", $@".."
+    public var csharpStrings = false       // @"..", $"..", $@"..", """raw""", $"""..."""
+    public var cStringPrefixes = false     // L"..", u"..", U"..", u8"..", u'..'
+    public var rawPrefix = false           // r"..." / r'...' without escapes (Dart, Nim, D, Julia)
+    public var singleQuoteInterp = false   // '...' strings interpolate too (Dart)
+    public var dollarParenInterp = false   // "$(expr)" inside strings (Julia, PowerShell)
+    /// A byte that may join a number's digits when a digit/letter follows: C++ `1'000`, Nim
+    /// `0x1F'i32`, Erlang `16#FF`. 0 = none.
+    public var numberJoiner: UInt8 = 0
+
+    /// One-off rules of a single language (or two close ones), checked only in the rare
+    /// branches for the bytes they involve.
+    public enum Dialect: Sendable {
+        case none, ruby, perl, php, elixir, julia, powershell, vim, zig, nix, erlang, d, ocaml, swift, cpp, nim
+    }
+    public var dialect = Dialect.none
 
     // Everything else
     public var hashPreprocessor = false    // # directives at line start (C family)
@@ -117,9 +131,15 @@ public enum CLike {
         var sawCreate = false         // SQL: in a `CREATE ...` statement
         // Spec options read per identifier, in locals: a class's stored properties are
         // reloaded after every opaque call (each token append), locals stay in registers.
-        let lineRule = s.lineStart, lineRuleOn = s.lineStart != .none
-        let jsDecl = s.jsDeclarations, kwlDepth = s.keywordlessDefinitionDepth, arrows = s.arrowBodies
+        // Only these few: every extra loop-carried value spills and slows every language
+        // (one more variable cost 15%); options of rare paths are read from `s` there,
+        // behind `anyDialect` (spec loads on every `"` `'` `=` `<` cost Python 8%).
+        let lineRuleOn = s.lineStart != .none
+        let jsDecl = s.jsDeclarations, kwlDepth = s.keywordlessDefinitionDepth
         let capTypes = s.capitalizedTypes, macroBang = s.macroBang
+        let anyDialect = s.dialect != .none
+        let perlWords = s.dialect == .perl   // words that may open a literal: q{..}, qw(..)
+        let keywordRules = s.lineStartLet || s.sqlCreate || jsDecl
 
         // `#!` line, before '#' can start a name (JS private fields).
         if start == 0 && closer == 0 && p[0] == 0x23 && p[1] == 0x21 {
@@ -139,12 +159,25 @@ public enum CLike {
                 if i == stop && i < end { i = cc.identSet.skip(p, i, end) }
                 let len = i - st
 
-                // String prefixes glued to a quote: f"..", r#"..", R"(..)", b'..'.
-                if i < end, p[i] == quote || p[i] == apos || p[i] == 0x23 {
-                    if let j = prefixedString(s, p, st, i, end, out) {
+                // String prefixes glued to a quote: f"..", r#"..", R"(..)", b'..'; tagged
+                // templates whose text is another language: css`..`, html`..`, sql`..`.
+                if i < end, p[i] == quote || p[i] == apos || p[i] == 0x23 || p[i] == backtick {
+                    if p[i] != backtick, let j = prefixedString(s, p, st, i, end, out) {
                         i = j; prev = quote; prevKeyword = false; hint = 0
                         continue
                     }
+                    if p[i] == backtick && jsDecl, let lang = taggedLanguage(p, st, i, prev: prev) {
+                        if prev != 0x2E { out.add(st, i, .function) }
+                        i = embeddedTemplate(s, p, i, end, out, lang)
+                        prev = backtick; prevKeyword = false; hint = 0
+                        continue
+                    }
+                }
+                // Perl quote-like operators (q qq qw qr m s tr y + a delimiter), not after `->`.
+                if perlWords && len <= 2 && i < end && !(prev == 0x3E && st >= 2 && p[st - 2] == 0x2D),
+                   let j = perlQuoteLike(s, p, st, i, end, out) {
+                    i = j; prev = quote; prevKeyword = false; hint = 0
+                    continue
                 }
 
                 var kind = TokenKind.plain
@@ -169,8 +202,8 @@ public enum CLike {
                     }
                     // Declarations found by a name in column 0.
                     if lineRuleOn && kw == 0 && hint == 0 && (st == start || p[st - 1] == newline)
-                        && lineStartDeclares(lineRule, p, i, end) {
-                        out.add(st, i, lineRule == .label ? .label : .function)
+                        && lineStartDeclares(s.lineStart, p, i, end) {
+                        out.add(st, i, s.lineStart == .label ? .label : .function)
                         out.addSymbol(st, i, .function, titleStart: st)
                         prev = p[i - 1]; prevKeyword = false
                         continue
@@ -215,24 +248,29 @@ public enum CLike {
                         if s.goReceivers && i < end && p[i] == 0x20 { receiverBase = parens; receiverAt = st }
                     }
                     if st > 0 && p[st - 1] == 0x3A { newHint = 0 }   // `Foo::class` refers to a class, doesn't declare one
-                    if s.lineStartLet && len == 3 && p[st] == 0x6C && p[st + 1] == 0x65 && p[st + 2] == 0x74
-                        && (st == start || p[st - 1] == newline) {
-                        newHint = KeywordTable.Hint.declaresFunction   // top-level `let f x =`
+                    if keywordRules {   // the languages with keyword-specific declaration rules
+                        if s.lineStartLet && len == 3 && p[st] == 0x6C && p[st + 1] == 0x65 && p[st + 2] == 0x74
+                            && (st == start || p[st - 1] == newline) {
+                            newHint = KeywordTable.Hint.declaresFunction   // top-level `let f x =`
+                        }
+                        if s.sqlCreate {
+                            if len == 6 && p[st] | 0x20 == 0x63 && p[st + 1] | 0x20 == 0x72 && p[st + 5] | 0x20 == 0x65 { sawCreate = true }
+                            if newHint == KeywordTable.Hint.declaresType && !sawCreate { newHint = 0 }   // `ALTER TABLE t`
+                        }
+                        if jsDecl && newHint != KeywordTable.Hint.declaresItself {
+                            if newHint == KeywordTable.Hint.declaresType && len == 5 && p[st] == 0x63 && p[st + 1] == 0x6C {
+                                pendingClass = true   // `class`: its body holds members
+                            } else if braces == 0 && newHint == 0 && isFunctionBinding(p, st, len, i, end) {
+                                newHint = KeywordTable.Hint.declaresFunction   // `const name = (...) =>`
+                            }
+                        }
                     }
-                    if s.sqlCreate {
-                        if len == 6 && p[st] | 0x20 == 0x63 && p[st + 1] | 0x20 == 0x72 && p[st + 5] | 0x20 == 0x65 { sawCreate = true }
-                        if newHint == KeywordTable.Hint.declaresType && !sawCreate { newHint = 0 }   // `ALTER TABLE t`
-                    }
-                    // `end program heat`, `end function` (Fortran, Pascal): closes, doesn't declare.
-                    if newHint != 0 && newHint != KeywordTable.Hint.declaresItself && afterEnd(p, start, st) { newHint = 0 }
-                    if newHint == KeywordTable.Hint.declaresItself {
-                        selfDeclaration(p, st, len, i, end, prev: prev, prevKeyword: prevKeyword, out)
-                        newHint = 0
-                    } else if jsDecl {
-                        if newHint == KeywordTable.Hint.declaresType && len == 5 && p[st] == 0x63 && p[st + 1] == 0x6C {
-                            pendingClass = true   // `class`: its body holds members
-                        } else if braces == 0 && newHint == 0 && isFunctionBinding(p, st, len, i, end) {
-                            newHint = KeywordTable.Hint.declaresFunction   // `const name = (...) =>`
+                    if newHint != 0 {
+                        // `end program heat`, `end function` (Fortran, Pascal): closes, doesn't declare.
+                        if newHint != KeywordTable.Hint.declaresItself && afterEnd(p, start, st) { newHint = 0 }
+                        if newHint == KeywordTable.Hint.declaresItself {
+                            selfDeclaration(p, st, len, i, end, prev: prev, prevKeyword: prevKeyword, out)
+                            newHint = 0
                         }
                     }
                     if keepHint { newHint = hint } else if newHint != 0 { hintAt = st }
@@ -255,7 +293,11 @@ public enum CLike {
                     kind = .function
                     // A definition's name follows a type, modifier or statement boundary, never
                     // an operator, `(`, `,` or `.`: those calls skip the scan of their arguments.
-                    if braces <= kwlDepth && definitionMayFollow(prev) && isDefinition(p, st, i, end, arrows: arrows) {
+                    // `return f(`, `await f(`, `new F(`: calls, whatever follows the arguments.
+                    // `return f(`, `await f(`, `new F(`: calls, whatever follows the arguments.
+                    // (Found by looking back: one more loop variable slowed every language 15%.)
+                    if braces <= kwlDepth && definitionMayFollow(prev) && !(prevKeyword && expressionKeywordBefore(p, start, st))
+                        && isDefinition(p, st, i, end, arrows: s.arrowBodies) {
                         let qs = qualifiedStart(p, start, st)   // `~Foo`, `Matrix::multiply` (C++)
                         out.addSymbol(qs, i, .function, titleStart: qs)
                     }
@@ -279,7 +321,7 @@ public enum CLike {
             }
 
             if c & ByteClass.digit != 0 {
-                let j = number(p, i, end, cc)
+                let j = number(p, i, end, cc, joiner: s.numberJoiner)
                 out.add(i, j, .number)
                 i = j; prev = 0x30; prevKeyword = false
                 continue
@@ -314,7 +356,11 @@ public enum CLike {
             var significant = true   // comments don't change `prev`
             switch b {
             case quote:
-                if s.doubleQuote {
+                if anyDialect && s.dialect == .vim && atLineStart(p, start, i) {   // `" comment` starts a Vim line
+                    j = lineEnd(p, i, end); out.add(i, j, .comment); significant = false
+                } else if s.csharpStrings && p[i + 1] == quote && p[i + 2] == quote {
+                    j = csharpRaw(p, i, end); out.add(i, j, .string)   // """raw""": no escapes
+                } else if s.doubleQuote {
                     if s.tripleQuotes && p[i + 1] == quote && p[i + 2] == quote {
                         j = tripleString(s, p, i, end, out, quote, interp: s.interpolation)
                     } else {
@@ -322,15 +368,20 @@ public enum CLike {
                     }
                 }
             case apos:
+                if anyDialect && s.dialect == .julia && (cc.isIdent(prev) || prev == 0x29 || prev == 0x5D || prev == 0x7D || prev == apos) {
+                    break   // `A'`, `f(x)'`: transpose
+                }
+                if anyDialect && s.dialect == .nix && p[i + 1] == apos { j = nixIndented(s, p, i, end, out); break }
                 switch s.singleQuote {
                 case .none: break
                 case .char:
                     j = string(s, p, i, end, out, apos, multiline: false, escapes: true, interp: .none)
                 case .string:
+                    let interp = s.singleQuoteInterp ? s.interpolation : .none
                     if s.tripleQuotes && p[i + 1] == apos && p[i + 2] == apos {
-                        j = tripleString(s, p, i, end, out, apos, interp: .none)
+                        j = tripleString(s, p, i, end, out, apos, interp: interp)
                     } else {
-                        j = string(s, p, i, end, out, apos, multiline: s.multilineStrings, escapes: true, interp: .none)
+                        j = string(s, p, i, end, out, apos, multiline: s.multilineStrings, escapes: true, interp: interp)
                     }
                 case .rustLifetimeOrChar:
                     if cc.isIdentStart(p[i + 1]) && p[i + 2] != apos {
@@ -360,7 +411,12 @@ public enum CLike {
                     j = lineEnd(p, i, end); out.add(i, j, .comment); significant = false
                 } else if s.slashStar && n == 0x2A {
                     j = blockComment(p, i, end, s.nestedBlockComments, 0x2F, 0x2A); out.add(i, j, .comment); significant = false
-                } else if s.regexLiterals && regexAllowed(prev, prevKeyword), let k = regex(p, i, end, cc) {
+                } else if anyDialect && s.dialect == .d && n == 0x2B {   // /+ nested +/
+                    j = blockComment(p, i, end, true, 0x2F, 0x2B, close0: 0x2B, close1: 0x2F); out.add(i, j, .comment); significant = false
+                } else if s.regexLiterals && regexAllowed(prev, prevKeyword),
+                          !(anyDialect && s.dialect == .swift && (n == 0x20 || n == 0x09 || n == 0x3D)),   // Swift: `a / b`, `/=` divide
+                          !((prev == 0x2B || prev == 0x2D) && postfixStep(p, start, i)),     // `x++ / 2` divides
+                          let k = regex(p, i, end, cc) {
                     out.add(i, k, .regex); j = k
                 }
             case 0x23: // '#'
@@ -368,6 +424,12 @@ public enum CLike {
                     j = lineEnd(p, i, end); out.add(i, j, .comment); significant = false
                 } else if s.hashAttribute && (p[i + 1] == 0x5B || (p[i + 1] == 0x21 && p[i + 2] == 0x5B)) {
                     j = matchBracket(p, i + (p[i + 1] == 0x21 ? 2 : 1), end, 0x5B, 0x5D); out.add(i, j, .attribute)
+                } else if anyDialect && s.dialect == .swift && (p[i + 1] == 0x2F || p[i + 1] == 0x23), let k = swiftRegex(p, i, end) {
+                    out.add(i, k, .regex); j = k   // #/regex/#
+                } else if anyDialect && s.dialect == .julia && p[i + 1] == 0x3D {   // #= nested =#
+                    j = blockComment(p, i, end, true, 0x23, 0x3D, close0: 0x3D, close1: 0x23); out.add(i, j, .comment); significant = false
+                } else if anyDialect && s.dialect == .nim && p[i + 1] == 0x5B {     // #[ nested ]#
+                    j = blockComment(p, i, end, true, 0x23, 0x5B, close0: 0x5D, close1: 0x23); out.add(i, j, .comment); significant = false
                 } else if s.swiftRawStrings && (p[i + 1] == quote || p[i + 1] == 0x23), let k = swiftRaw(p, i, end) {
                     out.add(i, k, .string); j = k
                 } else if s.hashPreprocessor && atLineStart(p, start, i) {
@@ -393,9 +455,18 @@ public enum CLike {
                 sawCreate = false
             case 0x25: // '%'
                 if s.percentComment { j = lineEnd(p, i, end); out.add(i, j, .comment); significant = false }
+                else if anyDialect && s.dialect == .ruby, let k = rubyPercent(s, p, i, end, out, exprStart: regexAllowed(prev, prevKeyword)) { j = k }
+                else if anyDialect && s.dialect == .perl && (cc.isIdentStart(p[i + 1]) || p[i + 1] == 0x24)
+                            && (prevKeyword || (!cc.isIdent(prev) && prev != 0x29 && prev != 0x5D)) {   // `my %h`, not `$a % $b`
+                    j = i + 1   // %hash
+                    while j < end && (cc.isIdent(p[j]) || p[j] == 0x24) { j &+= 1 }
+                    out.add(i, j, .variable)
+                }
             case 0x7B: // '{'
                 if s.haskellBlockComment && p[i + 1] == 0x2D {
                     j = blockComment(p, i, end, true, 0x7B, 0x2D, close0: 0x2D, close1: 0x7D); out.add(i, j, .comment); significant = false
+                } else if anyDialect && s.dialect == .ocaml, let k = ocamlQuoted(p, i, end) {
+                    out.add(i, k, .string); j = k   // {|text|}, {id|text|id}
                 }
             case 0x28: // '('
                 if s.ocamlBlockComment && p[i + 1] == 0x2A && p[i + 2] != 0x29 {
@@ -404,10 +475,24 @@ public enum CLike {
             case 0x5B: // '['
                 if s.luaLongBrackets && (p[i + 1] == 0x5B || p[i + 1] == 0x3D), let k = luaLong(p, i, end) {
                     out.add(i, k, .string); j = k
+                } else if anyDialect && s.dialect == .cpp && p[i + 1] == 0x5B {
+                    j = matchBracket(p, i, end, 0x5B, 0x5D); out.add(i, j, .attribute)   // [[nodiscard]]
                 }
+            case 0x3D: // '='
+                // `=begin`...`=end` (Ruby), POD `=head1`...`=cut` (Perl) at a line start.
+                if (anyDialect && s.dialect == .ruby || anyDialect && s.dialect == .perl) && (i == start || p[i - 1] == newline),
+                   let k = blockDoc(p, i, end, ruby: anyDialect && s.dialect == .ruby) {
+                    out.add(i, k, .comment); j = k; significant = false
+                }
+            case 0x7E: // '~'
+                if anyDialect && s.dialect == .elixir, let k = elixirSigil(s, p, i, end, out) { j = k }
+            case 0x5C: // '\'
+                if anyDialect && s.dialect == .zig && p[i + 1] == 0x5C { j = lineEnd(p, i, end); out.add(i, j, .string) }   // \\multiline
             case 0x40: // '@'
                 if s.csharpStrings && p[i + 1] == quote {
                     j = verbatimString(p, i + 1, end); out.add(i, j, .string)
+                } else if s.csharpStrings && p[i + 1] == 0x24 && p[i + 2] == quote {
+                    j = verbatimString(p, i + 2, end); out.add(i, j, .string)   // @$"..."
                 } else if s.atVariable && (cc.isIdentStart(p[i + 1]) || p[i + 1] == 0x40) {
                     j = i + (p[i + 1] == 0x40 ? 2 : 1)
                     while j < end && cc.isIdent(p[j]) { j &+= 1 }
@@ -439,13 +524,23 @@ public enum CLike {
                     }
                 }
             case 0x24: // '$'
-                if s.csharpStrings && (p[i + 1] == quote || (p[i + 1] == 0x40 && p[i + 2] == quote)) {
-                    if p[i + 1] == 0x40 {
+                if s.csharpStrings && (p[i + 1] == quote || p[i + 1] == 0x24 || (p[i + 1] == 0x40 && p[i + 2] == quote)) {
+                    var q = i + 1
+                    while p[q] == 0x24 { q &+= 1 }   // $$"""...""" raw interpolated
+                    if p[q] == quote && p[q + 1] == quote && p[q + 2] == quote {
+                        j = csharpRaw(p, q, end); out.add(i, j, .string)
+                    } else if p[i + 1] == 0x40 {
                         j = verbatimString(p, i + 2, end); out.add(i, j, .string)
-                    } else {
-                        out.add(i, i + 1, .string)
-                        j = string(s, p, i + 1, end, out, quote, multiline: false, escapes: true, interp: .braces)
+                    } else if p[q] == quote {
+                        out.add(i, q, .string)
+                        j = string(s, p, q, end, out, quote, multiline: false, escapes: true, interp: .braces)
                     }
+                } else if anyDialect && s.dialect == .erlang {   // $a, $\n: character codes
+                    j = min(i + (p[i + 1] == 0x5C ? 3 : 2), end); out.add(i, j, .string)
+                } else if anyDialect && s.dialect == .perl && p[i + 1] == 0x23 && (cc.isIdentStart(p[i + 2]) || p[i + 2] == 0x7B || p[i + 2] == 0x24) {
+                    j = i + 2   // $#array, $#{expr}, $#$ref: last index
+                    while j < end && (cc.isIdent(p[j]) || p[j] == 0x24) { j &+= 1 }
+                    out.add(i, j, .variable)
                 } else if s.dollarVariable {
                     if p[i + 1] == 0x7B {
                         j = matchBracket(p, i + 1, end, 0x7B, 0x7D); out.add(i, j, .variable)
@@ -467,11 +562,18 @@ public enum CLike {
                 }
             case 0x2E: // '.'
                 if cc.isDigit(p[i + 1]) && !cc.isIdent(prev) && prev != 0x29 && prev != 0x2E {
-                    j = number(p, i, end, cc); out.add(i, j, .number)
+                    j = number(p, i, end, cc, joiner: s.numberJoiner); out.add(i, j, .number)
                 }
             case 0x3C: // '<'
                 // `fun <T> name` (Kotlin): type parameters before the declared name.
                 if hint == KeywordTable.Hint.declaresFunction && prevKeyword { j = angleEnd(p, i, end) }
+                else if p[i + 1] == 0x3C && (anyDialect && s.dialect == .ruby || anyDialect && s.dialect == .perl || anyDialect && s.dialect == .php), let k = heredoc(s, p, i, end, out) { j = k }
+                else if anyDialect && s.dialect == .powershell && p[i + 1] == 0x23 {   // <# block comment #>
+                    let e = findAny(p, i + 2, end, 0x3E, 0x3E, 0x3E, 0x3E)
+                    var k = e
+                    while k < end && p[k - 1] != 0x23 { k = findAny(p, k + 1, end, 0x3E, 0x3E, 0x3E, 0x3E) }
+                    j = min(k + 1, end); out.add(i, j, .comment); significant = false
+                }
             default:
                 break
             }
@@ -558,6 +660,30 @@ public enum CLike {
             if p[k] == 0x7B { return true }
             guard p[k] == 0x2C else { return false }
             k += 1
+        }
+    }
+
+    /// The word before `st` (past spaces) is an expression keyword.
+    static func expressionKeywordBefore(_ p: UnsafePointer<UInt8>, _ start: Int, _ st: Int) -> Bool {
+        var e = st
+        while e > start && (p[e - 1] == 0x20 || p[e - 1] == 0x09) { e -= 1 }
+        var a = e
+        while a > start && isIdentByte(p[a - 1]) { a -= 1 }
+        return e - a >= 3 && e - a <= 6 && expressionKeyword(p, a)
+    }
+
+    /// The keyword at `k` starts an expression (`return`, `await`, `throw`, `new`, `yield`,
+    /// `else`, `case`): a name and parentheses after it are a call, not a definition.
+    @inline(__always) static func expressionKeyword(_ p: UnsafePointer<UInt8>, _ k: Int) -> Bool {
+        switch p[k] {
+        case 0x72: return p[k + 1] == 0x65 && p[k + 2] == 0x74 && p[k + 3] == 0x75 && p[k + 4] == 0x72 && p[k + 5] == 0x6E && !isIdentByte(p[k + 6])
+        case 0x61: return p[k + 1] == 0x77 && p[k + 2] == 0x61 && p[k + 3] == 0x69 && p[k + 4] == 0x74 && !isIdentByte(p[k + 5])
+        case 0x74: return p[k + 1] == 0x68 && p[k + 2] == 0x72 && p[k + 3] == 0x6F && p[k + 4] == 0x77 && !isIdentByte(p[k + 5])
+        case 0x6E: return p[k + 1] == 0x65 && p[k + 2] == 0x77 && !isIdentByte(p[k + 3])
+        case 0x79: return p[k + 1] == 0x69 && p[k + 2] == 0x65 && p[k + 3] == 0x6C && p[k + 4] == 0x64 && !isIdentByte(p[k + 5])
+        case 0x65: return p[k + 1] == 0x6C && p[k + 2] == 0x73 && p[k + 3] == 0x65 && !isIdentByte(p[k + 4])
+        case 0x63: return p[k + 1] == 0x61 && p[k + 2] == 0x73 && p[k + 3] == 0x65 && !isIdentByte(p[k + 4])
+        default: return false
         }
     }
 
@@ -895,26 +1021,30 @@ public enum CLike {
         return true
     }
 
-    static func number(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ cc: ByteClass) -> Int {
+    static func number(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ cc: ByteClass, joiner: UInt8 = 0) -> Int {
         var j = i
         let x = p[j + 1] | 0x20
+        // `_` separates digits everywhere; `joiner` too where the language has one (C++ `1'000`,
+        // Erlang `16#FF`), when a hex digit follows it.
+        @inline(__always) func sep(_ k: Int) -> Bool { p[k] == 0x5F || (p[k] == joiner && joiner != 0 && cc.isHex(p[k + 1])) }
         if p[j] == 0x30 && x == 0x78 {                     // 0x
             j &+= 2
-            while j < end && (cc.isHex(p[j]) || p[j] == 0x5F) { j &+= 1 }
-            if p[j] == 0x2E && cc.isHex(p[j + 1]) { j &+= 1; while j < end && (cc.isHex(p[j]) || p[j] == 0x5F) { j &+= 1 } }
+            while j < end && (cc.isHex(p[j]) || sep(j)) { j &+= 1 }
+            if p[j] == 0x2E && cc.isHex(p[j + 1]) { j &+= 1; while j < end && (cc.isHex(p[j]) || sep(j)) { j &+= 1 } }
             if (p[j] | 0x20) == 0x70 { j = exponent(p, j, end, cc) }   // hex float p-exponent
         } else if p[j] == 0x30 && (x == 0x62 || x == 0x6F) {    // 0b 0o
             j &+= 2
-            while j < end && (cc.isDigit(p[j]) || p[j] == 0x5F) { j &+= 1 }
+            while j < end && (cc.isDigit(p[j]) || sep(j)) { j &+= 1 }
         } else {
-            while j < end && (cc.isDigit(p[j]) || p[j] == 0x5F) { j &+= 1 }
+            while j < end && (cc.isDigit(p[j]) || sep(j)) { j &+= 1 }
             if j < end && p[j] == 0x2E && cc.isDigit(p[j + 1]) {
                 j &+= 1
-                while j < end && (cc.isDigit(p[j]) || p[j] == 0x5F) { j &+= 1 }
+                while j < end && (cc.isDigit(p[j]) || sep(j)) { j &+= 1 }
             }
             if (p[j] | 0x20) == 0x65 { j = exponent(p, j, end, cc) }
         }
-        // Suffixes: u32, f64, L, ULL, n, i (imaginary)...
+        // Suffixes: u32, f64, L, ULL, n, i (imaginary)...; Nim's `'i32` after the joiner.
+        if joiner != 0 && p[j] == joiner && cc.isIdentStart(p[j + 1]) { j &+= 1 }
         while j < end && cc.isIdent(p[j]) && p[j] < 0x80 { j &+= 1 }
         return min(j, end)
     }
@@ -934,13 +1064,7 @@ public enum CLike {
         var seg = i
         var j = i + 1
         let esc: UInt8 = escapes ? backslash : q
-        let special: UInt8
-        switch interp {
-        case .dollarBrace: special = 0x24
-        case .hashBrace: special = 0x23
-        case .braces: special = 0x7B
-        default: special = q
-        }
+        let special = interpolationByte(interp, q)
         while true {
             let k = findAny(p, j, end, q, esc, newline, special)
             if k >= end { j = end; break }
@@ -974,51 +1098,79 @@ public enum CLike {
                 seg = e; j = e
                 continue
             }
-            // Interpolation openers.
-            if interp == .braces && ch == 0x7B {
-                if p[k + 1] == 0x7B { j = k + 2; continue }              // {{ escape
-                out.add(seg, k, .string)
-                out.add(k, k + 1, .escape)
-                let r = lex(s, p, k + 1, end, out, closer: 0x7D)
-                let after = min(r + 1, end)
-                out.add(r, after, .escape)
-                seg = after; j = after
-                continue
-            }
-            if (interp == .dollarBrace && ch == 0x24) || (interp == .hashBrace && ch == 0x23) {
-                if p[k + 1] == 0x7B {
-                    out.add(seg, k, .string)
-                    out.add(k, k + 2, .escape)
-                    let r = lex(s, p, k + 2, end, out, closer: 0x7D)
-                    let after = min(r + 1, end)
-                    out.add(r, after, .escape)
-                    seg = after; j = after
-                    continue
-                }
-                if ch == 0x24 && s.dollarIdentInterp && s.chars.isIdentStart(p[k + 1]) {
-                    out.add(seg, k, .string)
-                    var e = k + 1
-                    while e < end && s.chars.isIdent(p[e]) { e &+= 1 }
-                    out.add(k, e, .variable)
-                    seg = e; j = e
-                    continue
-                }
-            }
+            if let r = interpolation(s, p, k, end, out, interp, &seg) { j = r; continue }
             j = k + 1
         }
         out.add(seg, j, .string)
         return j
     }
 
-    /// """...""" / '''...''' (may contain newlines and lone quotes).
+    /// The byte that opens an interpolation for `interp` (the quote itself when none).
+    @inline(__always) static func interpolationByte(_ interp: CLikeSpec.Interp, _ q: UInt8) -> UInt8 {
+        switch interp {
+        case .dollarBrace: 0x24
+        case .hashBrace: 0x23
+        case .braces: 0x7B
+        default: q
+        }
+    }
+
+    /// An interpolation at `k` (where the opener byte is): `{expr}`, `${expr}`, `#{expr}`,
+    /// `$(expr)`, `$name`. Emits the string up to it, the delimiters as escapes and the
+    /// expression lexed as code; returns where the string continues. Nil: not one.
+    static func interpolation(_ s: CLikeSpec, _ p: UnsafePointer<UInt8>, _ k: Int, _ end: Int, _ out: TokenStream,
+                              _ interp: CLikeSpec.Interp, _ seg: inout Int, kind: TokenKind = .string) -> Int? {
+        let ch = p[k]
+        var open = 0, closer: UInt8 = 0x7D
+        if interp == .braces && ch == 0x7B {
+            if p[k + 1] == 0x7B { return k + 2 }   // {{ escape
+            open = 1
+        } else if (interp == .dollarBrace && ch == 0x24) || (interp == .hashBrace && ch == 0x23) {
+            if p[k + 1] == 0x7B {
+                open = 2
+            } else if ch == 0x24 && s.dollarParenInterp && p[k + 1] == 0x28 {
+                open = 2; closer = 0x29
+            } else if ch == 0x24 && s.dollarIdentInterp && s.chars.isIdentStart(p[k + 1]) {
+                out.add(seg, k, kind)
+                var e = k + 1
+                while e < end && s.chars.isIdent(p[e]) && p[e] != 0x2D { e &+= 1 }
+                out.add(k, e, .variable)
+                seg = e
+                return e
+            }
+        }
+        if open == 0 { return nil }
+        out.add(seg, k, kind)
+        out.add(k, k + open, .escape)
+        let r = lex(s, p, k + open, end, out, closer: closer)
+        let after = min(r + 1, end)
+        out.add(r, after, .escape)
+        seg = after
+        return after
+    }
+
+    /// """...""" / '''...''' (may contain newlines and lone quotes), with the language's
+    /// interpolation (Kotlin/Scala/Dart `${}`, Python f'''{}''', Elixir `#{}`).
     static func tripleString(_ s: CLikeSpec, _ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ out: TokenStream,
-                             _ q: UInt8, interp: CLikeSpec.Interp) -> Int {
+                             _ q: UInt8, interp: CLikeSpec.Interp, escapes: Bool = true) -> Int {
         var seg = i
         var j = i + 3
+        let esc: UInt8 = escapes ? backslash : q
+        let special = interpolationByte(interp, q)
         while j < end {
-            let k = findAny(p, j, end, q, backslash, q, q)
+            let k = findAny(p, j, end, q, esc, special, q)
             if k >= end { j = end; break }
-            if p[k] == backslash {
+            let ch = p[k]
+            if ch == q {
+                if p[k + 1] == q && p[k + 2] == q {
+                    j = k + 3
+                    while j < end && p[j] == q { j &+= 1 }   // """" closes with extra quotes
+                    break
+                }
+                j = k + 1
+                continue
+            }
+            if ch == backslash {
                 out.add(seg, k, .string)
                 if interp == .swift && p[k + 1] == 0x28 {
                     out.add(k, k + 2, .escape)
@@ -1033,11 +1185,7 @@ public enum CLike {
                 }
                 continue
             }
-            if p[k + 1] == q && p[k + 2] == q {
-                j = k + 3
-                while j < end && p[j] == q { j &+= 1 }   // """" closes with extra quotes
-                break
-            }
+            if let r = interpolation(s, p, k, end, out, interp, &seg) { j = r; continue }
             j = k + 1
         }
         out.add(seg, min(j, end), .string)
@@ -1073,14 +1221,29 @@ public enum CLike {
             out.add(st, i, .string)
             let raw = (st..<i).contains { p[$0] | 0x20 == 0x72 }
             if s.tripleQuotes && p[i + 1] == q && p[i + 2] == q {
-                return tripleString(s, p, i, end, out, q, interp: .none)
+                return tripleString(s, p, i, end, out, q, interp: fmt ? .braces : .none, escapes: !raw)
             }
             return string(s, p, i, end, out, q, multiline: false, escapes: !raw, interp: fmt ? .braces : .none)
         }
+        // C/C++ encoding prefixes: L"wide", u8"utf8", u'c', U"x" (raw forms like u8R"(..)" below).
+        if s.cStringPrefixes && (q == quote || q == apos)
+            && ((len == 1 && (p[st] == 0x4C || p[st] == 0x75 || p[st] == 0x55)) || (len == 2 && p[st] == 0x75 && p[st + 1] == 0x38)) {
+            out.add(st, i, .string)
+            return string(s, p, i, end, out, q, multiline: false, escapes: true, interp: .none)
+        }
+        // r"raw" / r'raw' (Dart, Nim, D, Julia): no escapes, no interpolation.
+        if s.rawPrefix && len == 1 && p[st] == 0x72 && (q == quote || q == apos) {
+            out.add(st, i, .string)
+            if s.tripleQuotes && p[i + 1] == q && p[i + 2] == q {
+                return tripleString(s, p, i, end, out, q, interp: .none, escapes: false)
+            }
+            return string(s, p, i, end, out, q, multiline: false, escapes: false, interp: .none)
+        }
         if s.rustStrings && len <= 2 {
             let a = p[st], b2 = len == 2 ? p[st + 1] : 0
-            let isB = a == 0x62 && len == 1, isR = a == 0x72 && len == 1
-            let isBR = len == 2 && a == 0x62 && b2 == 0x72
+            // c"..." / cr"..." C strings behave like b"..." / br"...".
+            let isB = (a == 0x62 || a == 0x63) && len == 1, isR = a == 0x72 && len == 1
+            let isBR = len == 2 && (a == 0x62 || a == 0x63) && b2 == 0x72
             if isB && (q == quote || q == apos) {
                 out.add(st, i, .string)
                 return string(s, p, i, end, out, q, multiline: true, escapes: true, interp: .none)
@@ -1236,6 +1399,13 @@ public enum CLike {
         default:
             return false
         }
+    }
+
+    /// The last significant byte before `i` ends `++` or `--` (a postfix step: an operand).
+    static func postfixStep(_ p: UnsafePointer<UInt8>, _ start: Int, _ i: Int) -> Bool {
+        var k = i - 1
+        while k > start && (p[k] == 0x20 || p[k] == 0x09) { k -= 1 }
+        return k > start && p[k - 1] == p[k]
     }
 
     /// `/.../flags` on one line; nil if it doesn't close (then '/' was division).

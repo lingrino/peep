@@ -133,11 +133,16 @@ let lexTests: [Test] = [
     },
     Test("robustness: every language survives garbage") {
         var rng = SystemRandomNumberGenerator()
-        let alphabet = Array("\"'`/\\*#@$-{}()[]<>!?:;.,=+%&|^~ \n\tabcXYZ019_r€😀".unicodeScalars)
-        for _ in 0..<40 {
+        // Letters that open literals too: Perl q/qw/s/m/tr/y, Ruby %w, sigils, heredoc tags.
+        let alphabet = Array("\"'`/\\*#@$-{}()[]<>!?:;.,=+%&|^~ \n\tabcXYZ019_r€😀qswmytEOF".unicodeScalars)
+        for _ in 0..<60 {
             var s = ""
             for _ in 0..<400 { s.unicodeScalars.append(alphabet[Int.random(in: 0..<alphabet.count, using: &rng)]) }
             for l in Language.allCases { _ = lexed(l, s) }
+        }
+        // Openers at the very end of the text (scanners must stop at the end, not the padding).
+        for tail in ["<<~EOF", "<<<'X'", "%w[", "q{", "s{a}", "~r/", "$\"\"\"", "#/", "''", "{|", "<#", "\\\\", "=pod", "r\"", "`", "u8\"", "1'"] {
+            for l in Language.allCases { _ = lexed(l, "x = " + tail) }
         }
     },
     Test("outline: declarations from the lexer") {
@@ -154,6 +159,65 @@ let lexTests: [Test] = [
         expectEqual(syms(.java, "class B {\n  Stream open(String p) {\n    return with(p);\n  }\n}\n"), ["class B", ">open"])
         expectEqual(syms(.kotlin, "@file:Opt(Foo::class)\nclass C {\n  fun f() {}\n}\n"), ["class C", ">f"])
         expectEqual(syms(.python, "class A:\n    def m(self):\n        def inner(): pass\ndef top(): pass\n"), ["class A", ">m", ">>inner", "top"])
+    },
+    Test("literals: raw, interpolated and quote-like forms") {
+        // C++: digit separators (not char literals), encoding prefixes, attributes.
+        expectTokens(.cpp, "auto n = 1'000'000 + 0b1010'1010; auto s = u8\"x\" L\"w\"; [[nodiscard]] int f();",
+                     contains: ["number:1'000'000", "number:0b1010'1010", "string:u8\"x\"", "string:L\"w\"", "attribute:[[nodiscard]]"])
+        // C#: raw and raw-interpolated strings keep the rest of the file; verbatim interpolated.
+        let cs = lexed(.csharp, "var a = $\"\"\"\n  {x} \"q\"\n  \"\"\";\nvar b = @$\"C:\\{d}\\f\";\nint c = 1;")
+        expect(cs.contains("string:$\"\"\"\n  {x} \"q\"\n  \"\"\"") && cs.contains("string:@$\"C:\\{d}\\f\"") && cs.contains("number:1"), "\(cs)")
+        expectTokens(.csharp, "var r = \"\"\"C:\\path\\\"\"\"; int n = 2;", contains: ["string:\"\"\"C:\\path\\\"\"\"", "number:2"])
+        // Swift regex literals; division stays division.
+        expectTokens(.swift, "let a = /[a-z]+\\d/\nlet b = #/x / y/#\nlet c = d / e / f", contains: ["regex:/[a-z]+\\d/", "regex:#/x / y/#"])
+        expect(!lexed(.swift, "let c = d / e / f; x /= 2").contains { $0.hasPrefix("regex") }, "Swift division")
+        // Interpolation in triple-quoted and single-quoted strings; raw prefixes.
+        expectTokens(.kotlin, "val s = \"\"\"a ${x} $y\"\"\"", contains: ["escape:${", "variable:$y"])
+        expectTokens(.dart, "var a = 'hi $name ${x}'; var r = r'raw $no \\n';", contains: ["variable:$name", "escape:${", "string:r'raw $no \\n'"])
+        expectTokens(.python, "s = f'''v {x}'''", contains: ["string:f'''v ", "escape:{"])
+        expectTokens(.julia, "s = \"v $(x + 1)\"\nt = A' * B'\n#= block\n =#", contains: ["escape:$(", "number:1", "comment:#= block\n =#"])
+        expect(!lexed(.julia, "t = A' * B'").contains { $0.hasPrefix("string") }, "Julia transpose")
+        // Ruby percent literals, heredocs (the rest of the opener's line is code), =begin.
+        let rb = lexed(.ruby, "a = %w[x y] + %Q{v #{z}} + %r{^/p}i\nb = <<~SQL.strip\n  SELECT #{c}\nSQL\nd = 1\n=begin\ndoc\n=end\n")
+        for w in ["string:%w[x y]", "string:%Q{v ", "escape:#{", "regex:%r{^/p}i", "string:<<~SQL", "property:strip",
+                  "string:  SELECT ", "string:\nSQL", "number:1", "comment:=begin\ndoc\n=end"] {
+            expect(rb.contains(w), "ruby missing \(w) in \(rb)")
+        }
+        expect(!rb.contains { $0.hasPrefix("comment:#{") }, "#{ in a literal is not a comment: \(rb)")
+        // Perl quote-like operators, heredocs, POD, sigils.
+        let pl = lexed(.perl, "my @a = qw(x y);\n$s =~ s{a}{b}g;\nmy $n = $#a;\nmy %h;\nprint <<\"END\";\nhi $name\nEND\n=pod\n\ndoc\n\n=cut\nsub f { }\n")
+        for w in ["string:qw(x y)", "regex:s{a}{b}g", "variable:$#a", "variable:%h", "string:<<\"END\"", "variable:$name",
+                  "comment:=pod\n\ndoc\n\n=cut", "function:f"] {
+            expect(pl.contains(w), "perl missing \(w) in \(pl)")
+        }
+        // PHP: HTML around the code, heredoc/nowdoc, attributes, interpolation.
+        let php = lexed(.php, "<h1><?= $t ?></h1>\n<?php\n#[Attr]\n$a = \"v $x\";\n$b = <<<'N'\nraw $y\nN;\n")
+        for w in ["tag:h1", "meta:<?=", "variable:$t", "meta:?>", "meta:<?php", "attribute:#[Attr]", "variable:$x", "string:raw $y\nN"] {
+            expect(php.contains(w), "php missing \(w) in \(php)")
+        }
+        expectTokens(.php, "$x = 1; // no open tag: all code", contains: ["variable:$x", "number:1"])
+        // Elixir sigils, OCaml/Haskell char literals and quoted strings, Erlang chars and radix numbers.
+        expectTokens(.elixir, "r = ~r/a\\d+/i; w = ~w[a b]a", contains: ["regex:~r/a\\d+/i", "string:~w[a b]a"])
+        expectTokens(.ocaml, "let c = 'x' and s = {|a \"q\"|} in type 'a t", contains: ["string:'x'", "string:{|a \"q\"|}", "label:'a"])
+        expectTokens(.haskell, "f x' = show 'c'", contains: ["string:'c'"])
+        expectTokens(.erlang, "f() -> $a + $\\n + 16#FF.", contains: ["string:$a", "string:$\\n", "number:16#FF"])
+        // Zig multiline strings, Nim and D raw strings and comments, Nix indented strings, Vim and PowerShell comments.
+        expectTokens(.zig, "const s =\n    \\\\line one\n;", contains: ["string:\\\\line one"])
+        expectTokens(.nim, "let a = r\"x\\n\" & 0x1F'i32 #[ c ]#", contains: ["string:r\"x\\n\"", "number:0x1F'i32", "comment:#[ c ]#"])
+        expectTokens(.d, "/+ a /+ b +/ c +/ string s = r\"x\\\";", contains: ["comment:/+ a /+ b +/ c +/", "string:r\"x\\\""])
+        expectTokens(.nix, "a = ''\n  x ${y} ''${z}\n'';", contains: ["escape:${", "string: ''${z}\n''"])
+        expectTokens(.vim, "\" comment\nlet x = \"str\"", contains: ["comment:\" comment", "string:\"str\""])
+        expectTokens(.powershell, "<# block\n#>\n$s = \"v $x $(1)\"", contains: ["comment:<# block\n#>", "variable:$x", "escape:$("])
+        // Rust C strings; JS `x++ / 2` divides; tagged templates lex their language.
+        expectTokens(.rust, "let s = c\"cstr\";", contains: ["string:c\"cstr\""])
+        expect(!lexed(.javascript, "y = x++ / 2 / z;").contains { $0.hasPrefix("regex") }, "postfix ++ then division")
+        expectTokens(.typescript, "const s = sql`SELECT * FROM t WHERE id = ${id}`; const c = css`color: red;`; const d = styled.div`margin: 0;`",
+                     contains: ["function:sql", "keyword:SELECT", "keyword:FROM", "escape:${", "property:color", "property:margin"])
+        // Shell heredoc: the opener's line is lexed; unquoted bodies expand.
+        expectTokens(.shell, "cat <<EOF | grep x\nhi $USER\nEOF\n", contains: ["function:grep", "variable:$USER", "meta:EOF"])
+        // HTML: `<script lang="ts">` is TypeScript, `type="application/json"` JSON, `<style lang="scss">`.
+        expectTokens(.html, "<script lang=\"ts\">let n: number = 1</script><script type=\"application/json\">{\"k\": 1}</script>",
+                     contains: ["type:number", "property:\"k\""])
     },
     Test("outline: keywordless members and qualified names") {
         func syms(_ lang: Language, _ src: String) -> [String] {
