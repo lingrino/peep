@@ -31,10 +31,11 @@ fi
 
 CORE=(Sources/Core/**/*.swift(N) Sources/Render/**/*.swift(N))
 
-# Quick Look extension: entry point is NSExtensionMain (from Foundation), not main.
-swiftc "${COMMON[@]}" "${OPT[@]}" -application-extension -parse-as-library \
+# Quick Look extension: Sources/Preview/main.swift starts the background warm-up, then calls
+# NSExtensionMain (from Foundation).
+swiftc "${COMMON[@]}" "${OPT[@]}" -application-extension \
   -module-name PeepPreview "${CORE[@]}" Sources/Preview/**/*.swift(N) \
-  -Xlinker -e -Xlinker _NSExtensionMain -Xlinker -application_extension \
+  -Xlinker -application_extension \
   -o "$OUT/PeepPreview" &
 P1=$!
 swiftc "${COMMON[@]}" "${OPT[@]}" -module-name Peep "${CORE[@]}" Sources/App/**/*.swift(N) \

@@ -4,6 +4,18 @@ import os
 
 let log = Logger(subsystem: "com.lingrino.peep", category: "preview")
 
+/// Milliseconds between this process's start and the monotonic instant `t` (from `nanotime`).
+func processAgeMs(at t: UInt64) -> Double {
+    var kp = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+    guard sysctl(&mib, 4, &kp, &size, nil, 0) == 0 else { return -1 }
+    let st = kp.kp_proc.p_un.__p_starttime
+    let startWall = Double(st.tv_sec) + Double(st.tv_usec) / 1e6
+    let nowWall = Date().timeIntervalSince1970 - Double(nanotime() - t) / 1e9
+    return (nowWall - startWall) * 1000
+}
+
 /// Quick Look principal class. One instance per visible preview (Finder's column preview and
 /// the spacebar panel each get their own); the extension process is reused across previews.
 @objc(PeepPreviewController)
@@ -69,7 +81,14 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
         handler(nil)
         let ms = Double(nanotime() - t0) / 1e6
         log.notice("prepare \(url.lastPathComponent, privacy: .public): \(doc.timingSummary, privacy: .public) | total \(ms, format: .fixed(precision: 2))ms")
+        if PreviewViewController.firstPrepare {
+            // Cold start: how long the process existed before our first preview began.
+            PreviewViewController.firstPrepare = false
+            log.notice("cold start: first prepare began \(processAgeMs(at: t0), format: .fixed(precision: 1))ms after process start")
+        }
     }
+
+    private static var firstPrepare = true
 
     /// Ask Quick Look for a panel that fits the content (it clamps to the screen).
     private func preferredSize(for doc: Document) -> NSSize {

@@ -193,6 +193,10 @@ terms a typical README parses in 0.02–0.35 ms, so this matters mostly for 100 
 
 - Logs: `log stream --style compact --predicate 'subsystem == "com.lingrino.peep"'`
   (use `/usr/bin/log` from zsh). Crash reports: `~/Library/Logs/DiagnosticReports/Peep*.ips`.
+- Each extension process logs "cold start: first prepare began N ms after process start"
+  once (~150 ms is dyld + AppKit + Quick Look's view-service handshake, before any of our
+  code). `Prewarm` (started from `Sources/Preview/main.swift`) uses that window to build
+  fonts, glyph tables and lookup tables on a background thread: cold first prepare 9 → 3 ms.
 - Debug-level lines (`--level debug`) include each preview's first paint ("first paint: N
   tiles drawn in X ms, Y ms after setContent") and markdown layout timings.
 - Agent state: `launchctl print gui/$(id -u)/com.lingrino.peep.agent`.
