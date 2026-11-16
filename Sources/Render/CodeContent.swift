@@ -212,6 +212,9 @@ public final class CodeContent: DocumentContent {
             if let sh = shaped {
                 ctx.textPosition = CGPoint(x: padX, y: baseline)
                 CTLineDraw(sh.line, ctx)
+                // CTLineDraw advances the text position (part of the text matrix); the glyph
+                // fast path below positions glyphs absolutely and must start from zero.
+                ctx.textPosition = .zero
             } else {
                 drawASCII(ctx, s, e, baseline: baseline, minX: rect.minX, maxX: rect.maxX, palette: palette)
             }
