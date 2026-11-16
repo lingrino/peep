@@ -109,8 +109,7 @@ final class ImageStore {
         guard let url = resolve(s) else { done(nil, .zero); return }
         let finish: @Sendable (Data?) -> Void = { data in
             let (img, size) = ImageStore.decode(data)
-            nonisolated(unsafe) let image = img
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(image, size) } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(img, size) } }
         }
         if url.scheme == "data" {
             DispatchQueue.global(qos: .userInitiated).async { finish(ImageStore.dataURI(s)) }
@@ -120,8 +119,7 @@ final class ImageStore {
             }
         } else if let fetch = ImageStore.remoteFetch {
             fetch(url) { data in
-                nonisolated(unsafe) let d = data
-                DispatchQueue.global(qos: .userInitiated).async { finish(d) }
+                DispatchQueue.global(qos: .userInitiated).async { finish(data) }
             }
         } else {
             var req = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 15)

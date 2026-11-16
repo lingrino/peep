@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 // peep-dev: developer tool (not shipped). Renders files through the real view stack to PNG
 // and benchmarks the pipeline.
@@ -114,6 +115,67 @@ func lexbench(_ args: [String]) {
     print("\(lang.name): \(count) tokens, best \(String(format: "%.3f", Double(best) / 1e6))ms = \(String(format: "%.0f", Double(text.count) / Double(best) * 1e3)) MB/s; lines \(lc) in \(String(format: "%.3f", Double(lineNs) / 1e6))ms")
 }
 
+/// Dynamic UTI for a filename extension: "dyn.a" + base32("?0=6:1=<ext>") with LaunchServices'
+/// alphabet. These apply on machines where no installed app declares the extension.
+func dynamicUTI(_ ext: String) -> String {
+    let alphabet = Array("abcdefghkmnpqrstuvwxyz0123456789")
+    var out = "dyn.a"
+    var buffer: UInt32 = 0
+    var bits = 0
+    for b in "?0=6:1=\(ext.lowercased())".utf8 {
+        buffer = buffer << 8 | UInt32(b)
+        bits += 8
+        while bits >= 5 {
+            out.append(alphabet[Int((buffer >> UInt32(bits - 5)) & 31)])
+            bits -= 5
+        }
+    }
+    if bits > 0 { out.append(alphabet[Int((buffer << UInt32(5 - bits)) & 31)]) }
+    return out
+}
+
+/// Prints the QLSupportedContentTypes array for the extension's Info.plist.
+@MainActor
+func types(_ args: [String]) {
+    // Checks against values observed from LaunchServices.
+    precondition(dynamicUTI("go") == "dyn.ah62d4rv4ge80s52", dynamicUTI("go"))
+    precondition(dynamicUTI("rs") == "dyn.ah62d4rv4ge81e62", dynamicUTI("rs"))
+    var seen = Set<String>()
+    var list: [String] = []
+    func add(_ t: String) { if seen.insert(t).inserted { list.append(t) } }
+    // Never claim: Apple's rendered previews are what you want for these.
+    let exclude: Set<String> = ["public.svg-image", "com.adobe.pdf", "public.rtf"]
+    for (_, exts) in Language.extensionTable {
+        for e in exts.split(separator: " ").map(String.init) {
+            if let t = UTType(filenameExtension: e), !t.isDynamic, !exclude.contains(t.identifier) { add(t.identifier) }
+            add(dynamicUTI(e))
+        }
+    }
+    // Extensionless files (Makefile, Dockerfile, .gitignore, scripts) and broad families.
+    for t in ["public.data", "public.unix-executable", "public.plain-text", "public.text", "public.source-code",
+              "public.script", "public.shell-script", "public.make-source", "public.json", "public.yaml", "public.xml",
+              "net.daringfireball.markdown", "public.markdown", "com.apple.property-list", "com.apple.log",
+              // Third-party declarations that win over dynamic types when those apps are installed.
+              "com.microsoft.typescript", "public.typescript", "public.tsx", "com.netscape.javascript-source",
+              "public.toml", "io.toml", "org.vim.toml-file", "com.barebones.bbedit.rust-source", "org.rust-lang.rust",
+              "com.barebones.bbedit.go-source", "public.rust-source", "public.go-source", "public.kotlin-source",
+              "org.kotlinlang.source", "com.barebones.bbedit.typescript-source", "com.barebones.bbedit.toml-source",
+              "com.barebones.bbedit.scss-source", "com.barebones.bbedit.sql-source", "com.barebones.bbedit.lua-source",
+              "public.css", "public.scss", "public.sass", "public.less", "dev.svelte", "public.vue", "org.vuejs.vue",
+              "net.ia.markdown", "io.typora.markdown", "com.unknown.md", "org.quarto.qmarkdown", "com.rstudio.rmarkdown",
+              "com.fishshell.script", "public.zsh-script", "public.bash-script", "public.ruby-script", "public.python-script",
+              "public.perl-script", "public.php-script", "org.lua", "org.iso.sql", "com.microsoft.ini", "public.protobuf-source",
+              "public.swift-source", "public.c-source", "public.c-header", "public.c-plus-plus-source", "public.c-plus-plus-header",
+              "public.objective-c-source", "public.objective-c-plus-plus-source", "com.sun.java-source", "public.patch-file",
+              "public.comma-separated-values-text", "public.tab-separated-values-text", "com.apple.xcode.strings-text",
+              "com.apple.xcode.configsettings", "com.apple.xcode.entitlements-property-list", "org.videolan.mod",
+              "public.mpeg-2-transport-stream", "com.apple.applescript.text", "org.tug", "org.bibtex", "org.asciidoc", "org.orgmode",
+              "org.clojure", "org.khronos.glsl.fragment-shader", "com.apple.rez-source", "public.assembly-source"] {
+        add(t)
+    }
+    for t in list where !exclude.contains(t) { print("\t\t\t\t<string>\(t)</string>") }
+}
+
 /// Dump markdown layout (blocks, boxes) for debugging.
 @MainActor
 func layoutDump(_ args: [String]) {
@@ -149,6 +211,7 @@ MainActor.assumeIsolated {
     case "tokens": tokens(Array(args.dropFirst()))
     case "lexbench": lexbench(Array(args.dropFirst()))
     case "layout": layoutDump(Array(args.dropFirst()))
+    case "types": types(Array(args.dropFirst()))
     default: print("unknown command"); exit(2)
     }
 }

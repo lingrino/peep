@@ -9,7 +9,7 @@ public enum Language: UInt8, CaseIterable, Sendable {
     case crystal, powershell, vim, assembly, lisp, pascal, fortran
     // Dedicated lexers
     case json, yaml, toml, ini, dotenv, xml, html, css, scss, less, shell, diff, makefile
-    case dockerfile, markdown
+    case dockerfile, markdown, hexdump
 
     public var name: String {
         switch self {
@@ -29,6 +29,7 @@ public enum Language: UInt8, CaseIterable, Sendable {
         case .xml: "XML"; case .html: "HTML"; case .css: "CSS"; case .scss: "SCSS"; case .less: "Less"
         case .shell: "Shell"; case .diff: "Diff"; case .makefile: "Makefile"; case .dockerfile: "Dockerfile"
         case .markdown: "Markdown"
+        case .hexdump: "Binary"
         }
     }
 
@@ -50,6 +51,7 @@ public enum Language: UInt8, CaseIterable, Sendable {
         case .makefile: MakefileLexer.lex(p, start, end, out)
         case .dockerfile: DockerfileLexer.lex(p, start, end, out)
         case .markdown: MarkdownSourceLexer.lex(p, start, end, out)
+        case .hexdump: HexDump.lex(p, start, end, out)
         default: if let spec { CLike.lex(spec, p, start, end, out) }
         }
         out.finish(end)
@@ -139,72 +141,79 @@ public enum Language: UInt8, CaseIterable, Sendable {
         return nil
     }
 
-    static func byExtension(_ e: String) -> Language? {
-        switch e {
-        case "swift", "swiftinterface": return .swift
-        case "c", "h", "i": return .c
-        case "cc", "cpp", "cxx", "c++", "hh", "hpp", "hxx", "h++", "ipp", "tpp", "inl", "ixx", "cppm", "ino", "cu", "cuh": return .cpp
-        case "m", "mm": return .objc
-        case "cs", "csx", "cake": return .csharp
-        case "java", "jav": return .java
-        case "kt", "kts", "ktm": return .kotlin
-        case "scala", "sc", "sbt", "mill": return .scala
-        case "groovy", "gvy", "gy", "gsh", "gradle": return .groovy
-        case "dart": return .dart
-        case "go": return .go
-        case "rs", "ron": return .rust
-        case "zig", "zon": return .zig
-        case "js", "mjs", "cjs", "jsx", "es6", "es", "jsm", "gs", "jscad": return .javascript
-        case "ts", "mts", "cts", "tsx": return .typescript
-        case "py", "pyw", "pyi", "pyx", "pxd", "gyp", "gypi", "bzl", "star", "sconstruct", "sconscript", "wsgi", "rpy": return .python
-        case "rb", "rbw", "rake", "gemspec", "podspec", "ru", "jbuilder", "rabl", "thor", "irbrc", "pryrc", "builder": return .ruby
-        case "php", "phtml", "php3", "php4", "php5", "phps", "phpt", "inc": return .php
-        case "pl", "pm", "t", "pod", "psgi", "cgi": return .perl
-        case "lua", "luau", "rockspec", "p8": return .lua
-        case "r", "rprofile": return .r
-        case "jl": return .julia
-        case "sql", "ddl", "dml", "pgsql", "psql", "mysql", "prql", "hql", "cql": return .sql
-        case "hs", "lhs", "hsc", "cabal": return .haskell
-        case "elm": return .elm
-        case "ml", "mli", "mll", "mly", "re", "rei": return .ocaml
-        case "fs", "fsi", "fsx", "fsscript": return .fsharp
-        case "ex", "exs", "eex", "heex", "leex": return .elixir
-        case "erl", "hrl", "escript", "app.src": return .erlang
-        case "nix": return .nix
-        case "tf", "tfvars", "hcl", "nomad", "tftest": return .hcl
-        case "proto", "proto3", "thrift": return .protobuf
-        case "graphql", "gql", "graphqls": return .graphql
-        case "glsl", "vert", "frag", "geom", "comp", "tesc", "tese", "vsh", "fsh", "metal", "hlsl", "fx", "wgsl", "shader", "cginc": return .glsl
-        case "sol": return .solidity
-        case "d", "di": return .d
-        case "nim", "nims", "nimble": return .nim
-        case "cr": return .crystal
-        case "ps1", "psm1", "psd1": return .powershell
-        case "vim", "vimrc": return .vim
-        case "s", "asm", "nasm", "a51", "inc68k": return .assembly
-        case "lisp", "lsp", "cl", "el", "elc", "clj", "cljs", "cljc", "edn", "scm", "ss", "rkt", "fnl", "hy": return .lisp
-        case "pas", "pp", "dpr", "lpr", "dfm": return .pascal
-        case "f", "for", "f77", "f90", "f95", "f03", "f08": return .fortran
-        case "json", "jsonc", "json5", "jsonl", "ndjson", "geojson", "webmanifest", "har", "ipynb", "jsonld", "avsc", "tsbuildinfo", "code-workspace", "sublime-settings", "sublime-project": return .json
-        case "yaml", "yml", "clang-format": return .yaml
-        case "toml": return .toml
-        case "ini", "cfg", "conf", "config", "cnf", "properties", "prefs", "reg", "desktop", "service", "socket", "timer", "mount", "target", "inf", "lnk", "url", "gitconfig", "editorconfig", "npmrc", "pylintrc": return .ini
-        case "env", "envrc", "gitignore", "gitattributes", "dockerignore", "npmignore", "ignore": return .dotenv
-        case "xml", "plist", "xsd", "xsl", "xslt", "svg", "rss", "atom", "xib", "storyboard", "entitlements", "csproj", "fsproj", "vbproj", "props", "targets", "nuspec", "resx", "wsdl", "kml", "gpx", "xaml", "xliff", "xlf", "dae", "mobileconfig", "sdef", "pom", "iml", "tmtheme", "tmlanguage", "opml", "manifest": return .xml
-        case "html", "htm", "xhtml", "shtml", "vue", "svelte", "astro", "erb", "ejs", "hbs", "handlebars", "mustache", "njk", "jinja", "jinja2", "j2", "twig", "liquid", "jsp", "aspx", "cshtml", "razor", "tmpl", "gohtml": return .html
-        case "css", "pcss", "postcss": return .css
-        case "scss", "sass": return .scss
-        case "less", "styl": return .less
-        case "sh", "bash", "zsh", "ksh", "fish", "command", "tool", "bats", "ebuild", "eclass", "bashrc", "zshrc", "profile", "zprofile", "zshenv", "bash_profile", "install": return .shell
-        case "diff", "patch", "rej": return .diff
-        case "mk", "mak", "make", "just": return .makefile
-        case "dockerfile", "containerfile": return .dockerfile
-        case "md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdtxt", "mdtext", "rmd", "qmd", "mdx", "livemd": return .markdown
-        case "cmake": return .shell
-        case "lock": return .toml
-        default: return nil
-        }
-    }
+    /// File extensions (lowercase, without the dot) per language. Single source of truth for
+    /// detection *and* for the Quick Look content types Peep claims (Scripts/gen-types.sh).
+    public static let extensionTable: [(Language, String)] = [
+        (.swift, "swift swiftinterface"),
+        (.c, "c h i"),
+        (.cpp, "cc cpp cxx c++ hh hpp hxx h++ ipp tpp inl ixx cppm ino cu cuh"),
+        (.objc, "m mm"),
+        (.csharp, "cs csx cake"),
+        (.java, "java jav"),
+        (.kotlin, "kt kts ktm"),
+        (.scala, "scala sc sbt mill"),
+        (.groovy, "groovy gvy gy gsh gradle"),
+        (.dart, "dart"),
+        (.go, "go"),
+        (.rust, "rs ron"),
+        (.zig, "zig zon"),
+        (.javascript, "js mjs cjs jsx es6 es jsm gs jscad"),
+        (.typescript, "ts mts cts tsx"),
+        (.python, "py pyw pyi pyx pxd gyp gypi bzl star sconstruct sconscript wsgi rpy"),
+        (.ruby, "rb rbw rake gemspec podspec ru jbuilder rabl thor irbrc pryrc builder"),
+        (.php, "php phtml php3 php4 php5 phps phpt inc"),
+        (.perl, "pl pm t pod psgi cgi"),
+        (.lua, "lua luau rockspec p8"),
+        (.r, "r rprofile"),
+        (.julia, "jl"),
+        (.sql, "sql ddl dml pgsql psql mysql prql hql cql"),
+        (.haskell, "hs lhs hsc cabal"),
+        (.elm, "elm"),
+        (.ocaml, "ml mli mll mly re rei"),
+        (.fsharp, "fs fsi fsx fsscript"),
+        (.elixir, "ex exs eex heex leex"),
+        (.erlang, "erl hrl escript app.src"),
+        (.nix, "nix"),
+        (.hcl, "tf tfvars hcl nomad tftest"),
+        (.protobuf, "proto proto3 thrift"),
+        (.graphql, "graphql gql graphqls"),
+        (.glsl, "glsl vert frag geom comp tesc tese vsh fsh metal hlsl fx wgsl shader cginc"),
+        (.solidity, "sol"),
+        (.d, "d di"),
+        (.nim, "nim nims nimble"),
+        (.crystal, "cr"),
+        (.powershell, "ps1 psm1 psd1"),
+        (.vim, "vim vimrc"),
+        (.assembly, "s asm nasm a51 inc68k"),
+        (.lisp, "lisp lsp cl el elc clj cljs cljc edn scm ss rkt fnl hy"),
+        (.pascal, "pas pp dpr lpr dfm"),
+        (.fortran, "f for f77 f90 f95 f03 f08"),
+        (.json, "json jsonc json5 jsonl ndjson geojson webmanifest har ipynb jsonld avsc tsbuildinfo code-workspace sublime-settings sublime-project"),
+        (.yaml, "yaml yml clang-format"),
+        (.toml, "toml"),
+        (.ini, "ini cfg conf config cnf properties prefs reg desktop service socket timer mount target inf lnk url gitconfig editorconfig npmrc pylintrc"),
+        (.dotenv, "env envrc gitignore gitattributes dockerignore npmignore ignore"),
+        (.xml, "xml plist xsd xsl xslt svg rss atom xib storyboard entitlements csproj fsproj vbproj props targets nuspec resx wsdl kml gpx xaml xliff xlf dae mobileconfig sdef pom iml tmtheme tmlanguage opml manifest"),
+        (.html, "html htm xhtml shtml vue svelte astro erb ejs hbs handlebars mustache njk jinja jinja2 j2 twig liquid jsp aspx cshtml razor tmpl gohtml"),
+        (.css, "css pcss postcss"),
+        (.scss, "scss sass"),
+        (.less, "less styl"),
+        (.shell, "sh bash zsh ksh fish command tool bats ebuild eclass bashrc zshrc profile zprofile zshenv bash_profile install"),
+        (.diff, "diff patch rej"),
+        (.makefile, "mk mak make just"),
+        (.dockerfile, "dockerfile containerfile"),
+        (.markdown, "md markdown mdown mkd mkdn mdwn mdtxt mdtext rmd qmd mdx livemd"),
+        (.shell, "cmake"),
+        (.toml, "lock"),
+    ]
+
+    static let extensionMap: [String: Language] = {
+        var m: [String: Language] = [:]
+        for (l, list) in extensionTable { for e in list.split(separator: " ") { m[String(e)] = l } }
+        return m
+    }()
+
+    static func byExtension(_ e: String) -> Language? { extensionMap[e] }
 
     /// Shebang lines and a few unmistakable content prefixes.
     static func sniff(_ head: UnsafeBufferPointer<UInt8>) -> Language? {

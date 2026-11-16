@@ -44,13 +44,23 @@ public final class Document {
         mark("read")
         let decoded = Decoder.decode(file.raw, truncated: file.truncated)
         mark("decode")
-        guard case .text(let text, _, _) = decoded else {
-            return Document(kind: .binary, content: MessageContent("Binary file", detail: byteCount(file.fileSize)),
-                            fileSize: file.fileSize, truncated: false)
-        }
         let name = (path as NSString).lastPathComponent
-        let head = UnsafeBufferPointer(start: text.base, count: min(text.count, 512))
-        let lang = Language.detect(fileName: name, head: head)
+        var text: TextBuffer
+        var lang: Language
+        switch decoded {
+        case .text(let t, _, _):
+            text = t
+            let head = UnsafeBufferPointer(start: t.base, count: min(t.count, 512))
+            lang = Language.detect(fileName: name, head: head)
+        case .binary:
+            if let xml = binaryPlistAsXML(file.raw) {
+                text = xml
+                lang = .xml
+            } else {
+                text = HexDump.render(file.raw, limit: HexDump.limit)
+                lang = .hexdump
+            }
+        }
         mark("detect")
         if lang == .markdown {
             let md = MarkdownParser.parse(text)
@@ -70,7 +80,8 @@ public final class Document {
         let tokens = TokenStream(expectedBytes: prefixEnd)
         lang.lex(text.base, 0, prefixEnd, tokens)
         mark("lex")
-        let content = CodeContent(text: text, lines: lines, tokens: tokens, language: lang, typography: typography)
+        let content = CodeContent(text: text, lines: lines, tokens: tokens, language: lang, typography: typography,
+                                  lineNumbers: lang != .hexdump)
         mark("content")
         let doc = Document(kind: .code(lang), content: content, fileSize: file.fileSize, truncated: file.truncated)
         doc.timings = times
@@ -97,6 +108,15 @@ public final class Document {
 
     /// Called on the main thread when background work changes what should be drawn.
     public var onUpdate: (() -> Void)?
+
+    /// Binary property lists (bplist00) shown as their XML form.
+    static func binaryPlistAsXML(_ raw: TextBuffer) -> TextBuffer? {
+        guard raw.count > 8, memcmp(raw.base, "bplist00", 8) == 0 else { return nil }
+        let data = Data(bytesNoCopy: raw.base, count: raw.count, deallocator: .none)
+        guard let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let xml = try? PropertyListSerialization.data(fromPropertyList: obj, format: .xml, options: 0) else { return nil }
+        return xml.withUnsafeBytes { TextBuffer(copying: $0) }
+    }
 
     static func message(_ s: String, fileSize: Int) -> Document {
         Document(kind: .error(s), content: MessageContent(s, detail: ""), fileSize: fileSize, truncated: false)
