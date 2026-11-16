@@ -51,7 +51,7 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 | Path | What |
 |---|---|
 | `Sources/Core/Text/` | `TextBuffer` (padded bytes), `FileLoader` (incl. tail loads), `Decoder` (encodings/binary), `LineIndex` (SIMD), `Search` (SIMD), `SIMD.swift` helpers, `HexDump`, `JSONFormatter` (minified JSON), `JSONTree` (range-based JSON parse), `ByteOutput` (generated text), `Clock` |
-| `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, markdown source), `Language` (detection table, wrapper suffixes, dispatch), `CodeOutline` (declarations -> sidebar entries) |
+| `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `CLikeExtras` (one language's literals: Ruby/Perl quote-likes and heredocs, sigils, C# raw strings, tagged templates), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, PHP, markdown source), `Language` (detection table, wrapper suffixes, dispatch), `CodeOutline` (declarations -> sidebar entries) |
 | `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities`, `Emoji` + generated `EmojiTable` (GitHub shortcodes), `Notebook` (.ipynb -> Markdown) |
 | `Sources/Core/Archive/` | `ArchiveListing` (entries SoA, folder tree, text + tokens), `ZipReader` (central directory), `TarReader` (headers, pax/GNU), `Decompress` (gzip/xz streams, single compressed files) |
 | `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline: archives, compressed files, SQLite, notebooks, minified JSON, logs), `SQLitePreview`, `Prewarm` (launch-time warm-up) |
@@ -112,6 +112,11 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   loop on 1–6 byte runs. Lexers check a few bytes scalar first, then go SIMD.
 - Token storage is struct-of-arrays (`ends: [UInt32]`, `kinds: [UInt8]`); starts are implied.
 - Big files: lex a 256 KB prefix synchronously, the rest on a background P-core, swap tokens.
+- `CLike.lex`'s main loop is at the edge of register pressure: one more loop-carried variable
+  slowed every language ~15%, and reading spec options on common bytes (`"` `=` `<`) cost Python
+  8%. New behavior goes in rare branches, behind a local gate (`anyDialect`, `hint != 0`), reading
+  options from `s` there; state that would be one more variable is recomputed by looking back
+  (`expressionKeywordBefore`). Compare with `bench.sh`-style alternating runs of the old binary.
 - Rendering: tiles (512 pt, layer-backed, opaque) draw once; scrolling moves layers. ASCII code
   lines draw via a glyph table + `CTFontDrawGlyphs` (positions are in *text space*: negate y
   because the text matrix flips). Non-ASCII lines use `CTLine`.
@@ -188,8 +193,12 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 - **Wrapper suffixes** (`.dist`, `.example`, `.in`, `.j2`, ...) are looked through by
   `Language.detect`; each wrapper is one registered type.
 - **Code outline**: the lexer records declarations (`TokenStream.addSymbol`) from declaring
-  keywords, Go receivers, and keywordless C-family definitions; `CodeOutline` titles and levels
-  them. Sidebar for files of 60+ lines with 3+ symbols.
+  keywords (D/T; S = the keyword itself: `init`, `impl`, HCL blocks), Go receivers, keywordless
+  C-family/Dart/C# definitions (only after a type, modifier or statement boundary, never after
+  `return`/`new`), JS/TS class members and `const f = () =>`, column-0 rules (`CLikeSpec.lineStart`:
+  Haskell/Elm signatures, Erlang clauses, labels, R), qualified names (`def self.x`, `fun T.x`).
+  `CodeOutline` titles and levels them (Swift inits get argument labels; adjacent one-line clauses
+  merge). Sidebar for files of 60+ lines with 3+ symbols. Check with `peep-dev symbols [--all]`.
 
 ## Benchmarks and the bar
 
