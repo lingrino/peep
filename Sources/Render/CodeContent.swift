@@ -74,9 +74,9 @@ public final class CodeContent: DocumentContent {
         lines.count < 60 ? [] : codeSymbols().map { OutlineEntry(level: $0.level, title: $0.title) }
     }
 
-    public func outlineY(_ i: Int) -> CGFloat? {
+    public func outlineSpan(_ i: Int) -> (top: CGFloat, height: CGFloat)? {
         let s = codeSymbols()
-        return i < s.count ? lineTop(s[i].line) : nil
+        return i < s.count ? (lineTop(s[i].line), typo.lineHeight) : nil
     }
 
     public func outlineIndex(atY y: CGFloat) -> Int {

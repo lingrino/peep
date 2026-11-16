@@ -32,6 +32,7 @@ public final class MarkdownContent: DocumentContent {
     private(set) var boxes: [TextBox] = []
     private var decos: [PlacedDeco] = []
     private(set) var headingY: [CGFloat] = []
+    private var headingHeight: [CGFloat] = []
     public private(set) var lastLayoutNanos: UInt64 = 0
 
     /// Called when async work (images) needs a relayout.
@@ -160,6 +161,7 @@ public final class MarkdownContent: DocumentContent {
         boxes.removeAll(keepingCapacity: true)
         decos.removeAll(keepingCapacity: true)
         headingY = [CGFloat](repeating: 0, count: doc.headings.count)
+        headingHeight = headingY
         var y = m.padTop
         var maxRight = x0
         var prevQuote: UInt8 = 0
@@ -176,7 +178,7 @@ public final class MarkdownContent: DocumentContent {
             for d in r.decos { decos.append(PlacedDeco(minY: d.minY + top, maxY: d.maxY + top, deco: d.deco.offset(top))) }
             y = top + r.height
             maxRight = max(maxRight, r.right)
-            if b.kind == .heading && b.heading >= 0 { headingY[Int(b.heading)] = top }
+            if b.kind == .heading && b.heading >= 0 { headingY[Int(b.heading)] = top; headingHeight[Int(b.heading)] = r.height }
 
             // List marker beside the block's first line.
             if b.marker != .none, let fb = r.firstBaseline {
@@ -433,9 +435,9 @@ public final class MarkdownContent: DocumentContent {
 
     public var outlineEntries: [OutlineEntry] { doc.headings.map { OutlineEntry(level: $0.level, title: $0.title) } }
 
-    public func outlineY(_ i: Int) -> CGFloat? {
+    public func outlineSpan(_ i: Int) -> (top: CGFloat, height: CGFloat)? {
         finishLayout()
-        return i < headingY.count ? headingY[i] : nil
+        return i < headingY.count ? (headingY[i], headingHeight[i]) : nil
     }
 
     public func outlineIndex(atY y: CGFloat) -> Int {

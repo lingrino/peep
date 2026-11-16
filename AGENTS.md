@@ -79,7 +79,7 @@ Scripts/dev.sh smoke <dirs/files...>  # open+draw+scroll+find every file; crashe
 Scripts/dev.sh parsebench <file.md|dir> [N]   # markdown parse throughput (dir: MB/s by file size, slowest files)
 Scripts/dev.sh mddump <outdir> <files/dirs...>  # full dump per parsed .md: diff -r old/new dumps around parser changes
 Scripts/dev.sh findbench <file> <query...>  # raw search vs full find path per query
-Scripts/dev.sh jumpbench <file.md...>      # table-of-contents jump cost (scroll + tile draws)
+Scripts/dev.sh jumpbench <files...>        # outline jump cost (scroll + tile draws), flashes, highlighted row
 Scripts/dev.sh symbols <files...>          # code outline entries as the sidebar shows them
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets

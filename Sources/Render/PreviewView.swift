@@ -7,7 +7,11 @@ public final class PreviewView: NSView {
     public let documentView = DocumentView(frame: .zero)
     public private(set) var document: Document?
     private var lastWidth: CGFloat = 0
-    private var outline: OutlineView?
+    private(set) var outline: OutlineView?
+    /// Outline entry chosen by a click or link, kept highlighted while the view stays where
+    /// the jump left it. An entry near the end can't scroll to the top, and the scroll
+    /// position alone names an earlier entry: such clicks looked like they did nothing.
+    private var pinned: (index: Int, scrollY: CGFloat)?
     private var notice: NoticeView?
     /// Links that leave the document (http, mailto, other files). In-document anchors are
     /// handled here.
@@ -74,7 +78,27 @@ public final class PreviewView: NSView {
 
     private func updateOutlineCurrent() {
         guard let o = outline, !o.isHidden, let c = document?.content else { return }
-        o.setCurrent(heading: max(0, c.outlineIndex(atY: scrollView.contentView.bounds.minY + 40)))
+        let y = scrollView.contentView.bounds.minY
+        if let p = pinned {
+            if abs(y - p.scrollY) < 0.5 { o.setCurrent(heading: p.index); return }
+            pinned = nil
+        }
+        o.setCurrent(heading: max(0, c.outlineIndex(atY: y + 40)))
+    }
+
+    /// Scrolls outline entry `i` to the top (as far as the document allows) and marks it
+    /// current; flashes it when it couldn't reach the top.
+    public func jumpToOutline(_ i: Int) {
+        guard let span = document?.content.outlineSpan(i) else { return }
+        reveal(span, outlineIndex: i)
+    }
+
+    private func reveal(_ span: (top: CGFloat, height: CGFloat), outlineIndex i: Int) {
+        documentView.scrollToTop(y: span.top - 12)
+        let y = scrollView.contentView.bounds.minY
+        pinned = (i, y)
+        if let o = outline, !o.isHidden { o.setCurrent(heading: i) }
+        if span.top - 12 > y + 1 { documentView.flash(top: span.top, height: span.height) }
     }
 
     /// Sidebar for Markdown headings and code declarations (3 or more entries).
@@ -84,10 +108,7 @@ public final class PreviewView: NSView {
         let o = OutlineView(frame: NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height))
         o.setEntries(entries)
         o.lateClickHandled = { [weak self] e in self?.lateMouseDown(e) ?? false }
-        o.onSelect = { [weak self] i in
-            guard let self, let y = self.document?.content.outlineY(i) else { return }
-            self.documentView.scrollToTop(y: y - 12)
-        }
+        o.onSelect = { [weak self] i in self?.jumpToOutline(i) }
         addSubview(o, positioned: .below, relativeTo: scrollView)
         outline = o
         needsLayout = true
@@ -96,6 +117,7 @@ public final class PreviewView: NSView {
     /// Background work changed the content's entries (full lex of a big file).
     private func refreshOutline() {
         guard let c = document?.content else { return }
+        pinned = nil
         if let o = outline {
             o.setEntries(c.outlineEntries)
             updateOutlineCurrent()
@@ -110,7 +132,9 @@ public final class PreviewView: NSView {
 
     private func handleLink(_ l: String) {
         if l.hasPrefix("#") {
-            if let y = document?.content.anchorY(l) { documentView.scrollToTop(y: y - 12) }
+            guard let c = document?.content, let y = c.anchorY(l) else { return }
+            let i = c.outlineIndex(atY: y)
+            if i >= 0, let span = c.outlineSpan(i), span.top == y { reveal(span, outlineIndex: i) } else { documentView.scrollToTop(y: y - 12) }
             return
         }
         if let u = URL(string: l), u.scheme != nil { onExternalLink?(l); return }
@@ -127,6 +151,7 @@ public final class PreviewView: NSView {
 
     public func show(_ doc: Document) {
         document = doc
+        pinned = nil
         doc.onUpdate = { [weak self] in
             self?.documentView.invalidateAll()
             self?.refreshOutline()

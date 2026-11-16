@@ -573,29 +573,34 @@ func jumpBench(_ args: [String]) {
     for f in args {
         let doc = Document.open(path: f)
         view.show(doc)
-        guard let md = doc.content as? MarkdownContent else { print("not markdown"); continue }
-        md.finishLayout()
+        (doc.content as? MarkdownContent)?.finishLayout()
+        let n = doc.content.outlineEntries.count
+        guard n > 0, let o = view.outline else { print("\((f as NSString).lastPathComponent): no outline"); continue }
         view.layoutSubtreeIfNeeded()
         view.displayIfNeeded()
         for t in view.documentView.subviews { t.layer?.displayIfNeeded() }
         var times: [Double] = [], draws: [Int] = []
-        let n = md.headingY.count
+        var wrongRow = 0
+        let flashes = view.documentView.flashCount
         let order = (0..<n).map { ($0 * 7919) % max(1, n) }   // scattered jumps, like real clicks
         for i in order {
             let before = view.documentView.tileDrawStats
             let t0 = nanotime()
-            view.documentView.scrollToTop(y: md.headingY[i] - 12)
+            view.jumpToOutline(i)
             view.displayIfNeeded()
             // Offscreen windows don't display layer-backed tiles on their own.
             for t in view.documentView.subviews { t.layer?.displayIfNeeded() }
             times.append(Double(nanotime() - t0) / 1e6)
             draws.append(view.documentView.tileDrawStats.count - before.count)
+            // The clicked entry (or the row standing for it) must be the highlighted one.
+            if o.currentRow != (o.indexMap.lastIndex { $0 <= i } ?? -1) { wrongRow += 1 }
         }
         times.sort()
         let med = times.isEmpty ? 0 : times[times.count / 2]
-        print(String(format: "%@: %d jumps, median %.2fms, worst %.2fms, tiles/jump %.1f",
+        print(String(format: "%@: %d jumps, median %.2fms, worst %.2fms, tiles/jump %.1f, flashed %d, wrong row %d",
                      (f as NSString).lastPathComponent, times.count, med, times.last ?? 0,
-                     Double(draws.reduce(0, +)) / Double(max(1, draws.count))))
+                     Double(draws.reduce(0, +)) / Double(max(1, draws.count)),
+                     view.documentView.flashCount - flashes, wrongRow))
     }
 }
 

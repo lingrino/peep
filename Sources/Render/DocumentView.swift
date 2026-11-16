@@ -36,8 +36,8 @@ public protocol DocumentContent: AnyObject {
     func willShow(_ rect: CGRect)
     /// Sidebar entries (Markdown headings, code declarations); fewer than 3 = no sidebar.
     var outlineEntries: [OutlineEntry] { get }
-    /// Content y of entry `i` (exact: may finish deferred layout).
-    func outlineY(_ i: Int) -> CGFloat?
+    /// Top and height of entry `i` in content space (exact: may finish deferred layout).
+    func outlineSpan(_ i: Int) -> (top: CGFloat, height: CGFloat)?
     /// The entry whose section contains content y (-1 above the first).
     func outlineIndex(atY y: CGFloat) -> Int
     /// Height of the viewport, before `layout(width:)`: how much content must be exact for
@@ -53,7 +53,7 @@ extension DocumentContent {
     public func anchorY(_ name: String) -> CGFloat? { nil }
     public func willShow(_ rect: CGRect) {}
     public var outlineEntries: [OutlineEntry] { [] }
-    public func outlineY(_ i: Int) -> CGFloat? { nil }
+    public func outlineSpan(_ i: Int) -> (top: CGFloat, height: CGFloat)? { nil }
     public func outlineIndex(atY y: CGFloat) -> Int { -1 }
     public func setViewportHeight(_ h: CGFloat) {}
 }
@@ -506,6 +506,42 @@ public final class DocumentView: NSView {
         let target = CGPoint(x: vis.minX, y: max(0, min(y, bounds.height - vis.height)))
         sv.contentView.scroll(to: target)
         sv.reflectScrolledClipView(sv.contentView)
+    }
+
+    private lazy var flashView = FlashView(frame: .zero)
+    /// Number of flashes shown (peep-dev jumpbench reports it).
+    private(set) var flashCount = 0
+
+    /// Briefly highlights a band of content: where a jump landed when it couldn't be
+    /// scrolled to the top. A view above the tiles whose layer opacity Core Animation fades:
+    /// no tile redraws.
+    public func flash(top: CGFloat, height: CGFloat) {
+        let f = flashView
+        // On top of every tile, including the ones the jump just placed.
+        addSubview(f, positioned: .above, relativeTo: nil)
+        f.frame = NSRect(x: 0, y: top, width: bounds.width, height: height)
+        f.alphaValue = 0   // resting state; the animation shows it
+        let a = CAKeyframeAnimation(keyPath: "opacity")
+        a.values = [1, 1, 0]
+        a.keyTimes = [0, 0.5, 1]
+        a.duration = 1.6
+        f.layer?.removeAnimation(forKey: "flash")
+        f.layer?.add(a, forKey: "flash")
+        flashCount += 1
+    }
+}
+
+/// The band `DocumentView.flash` shows: the find-highlight color, translucent.
+final class FlashView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.findHighlightColor.withAlphaComponent(0.4).cgColor
     }
 }
 

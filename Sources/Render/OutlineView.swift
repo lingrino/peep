@@ -59,6 +59,9 @@ final class OutlineView: NSView {
         needsLayout = true
     }
 
+    /// Highlighted row (-1: none).
+    var currentRow: Int { list.current }
+
     /// Maps outline rows to heading indices in the document.
     private(set) var indexMap: [Int] = []
 
