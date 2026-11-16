@@ -41,6 +41,9 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        #if PEEP_DIAG
+        Diag.log.notice("shown \(((self.preview.document?.path ?? "-") as NSString).lastPathComponent, privacy: .public)")
+        #endif
         visible = true
         report()
     }
@@ -98,6 +101,9 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         let t0 = nanotime()
+        #if PEEP_DIAG
+        Diag.log.notice("prepare begin \(url.lastPathComponent, privacy: .public)")
+        #endif
         let doc = Document.open(path: url.path)
         let preferred = preferredSize()
         preferredContentSize = preferred

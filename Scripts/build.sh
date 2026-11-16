@@ -8,6 +8,8 @@
 #   Scripts/build.sh                 # release build -> .build/Peep.app
 #   Scripts/build.sh install         # ...and install to /Applications + register extension
 #   CONFIG=debug Scripts/build.sh    # unoptimized build with debug info
+#   DIAG=1 Scripts/build.sh install  # extension diagnostics: main-thread stalls, when Quick Look
+#                                    # shows each preview, memory (Sources/Preview/Diag.swift)
 set -euo pipefail
 
 ROOT=${0:A:h:h}
@@ -33,7 +35,14 @@ CORE=(Sources/Core/**/*.swift(N) Sources/Render/**/*.swift(N))
 
 # Quick Look extension: Sources/Preview/main.swift starts the background warm-up, then calls
 # NSExtensionMain (from Foundation).
-swiftc "${COMMON[@]}" "${OPT[@]}" -application-extension \
+DIAGFLAGS=()
+[[ "${DIAG:-0}" == 1 ]] && DIAGFLAGS=(-D PEEP_DIAG)
+if [[ "${1:-}" == typecheck ]]; then   # compile-check only (Scripts/check.sh: the DIAG variant)
+  swiftc "${COMMON[@]}" -typecheck "${DIAGFLAGS[@]}" -application-extension \
+    -module-name PeepPreview "${CORE[@]}" Sources/Preview/**/*.swift(N)
+  exit 0
+fi
+swiftc "${COMMON[@]}" "${OPT[@]}" "${DIAGFLAGS[@]}" -application-extension \
   -module-name PeepPreview "${CORE[@]}" Sources/Preview/**/*.swift(N) \
   -Xlinker -application_extension \
   -o "$OUT/PeepPreview" &

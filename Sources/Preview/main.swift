@@ -7,4 +7,7 @@ import Foundation
 func NSExtensionMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32
 
 DispatchQueue.global(qos: .userInteractive).async { Prewarm.run() }
+#if PEEP_DIAG
+Diag.start()
+#endif
 exit(NSExtensionMain(CommandLine.argc, CommandLine.unsafeArgv))

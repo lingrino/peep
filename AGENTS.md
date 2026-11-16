@@ -17,6 +17,29 @@ compromise for latency. Read this whole file before changing anything.
 - **Stop only for one-way doors** or things only the owner can do (permission prompts,
   passwords). Otherwise decide, record the decision here or in code comments, and move on.
 
+## Workflow (start here, especially after time away)
+
+1. `Scripts/check.sh` (~35 s): tests (debug and release), zero compiler warnings, both
+   targets (and the `DIAG=1` variant), then the view checks over `Examples/` and the docs:
+   smoke (open, draw, scroll, find, select every file; Markdown geometry), tile coverage,
+   link hit testing. Run it first when coming back and after any macOS or toolchain update;
+   it must pass before every commit. `--corpus` adds `.build/corpus` (`Scripts/make-corpus.sh`).
+2. Measure the change against the last commit (or `--rev R`), on this machine:
+   - renders: `Scripts/compare.sh renders [files]` pixel-diffs every example; every
+     difference must be intended and said in the commit message;
+   - speed: `Scripts/compare.sh bench <peep-dev command...>` (alternating rounds);
+   - parser changes: `Scripts/make-corpus.sh`, `mddump` with the old (`Scripts/baseline.sh`)
+     and new `peep-dev` + `diff -r`, `parsebench .build/corpus/files`, ASAN (see Benchmarks);
+   - Quick Look itself (when it shows previews, stalls in its code paths): `DIAG=1
+     Scripts/build.sh install`, `peep-dev panelwatch`, the log stream (see Debugging).
+3. `Scripts/build.sh install`, try it in Finder (computer use works), commit.
+
+Not here on purpose: a formatter or linter (the bar is zero warnings; a formatter would churn
+hand-laid-out hot loops), CI (needs macOS 27 on Apple Silicon; `check.sh` is the gate),
+checked-in golden images (macOS font updates move pixels; compare against a revision on the
+same machine instead), SwiftPM/XCTest (see Commands). `peep-dev` is offline: remote images
+never load there (`render --remote` fetches them), so checks and benchmarks are deterministic.
+
 ## Processes
 
 ```
@@ -68,21 +91,27 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 | `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities`, `Emoji` + generated `EmojiTable` (GitHub shortcodes), `Notebook` (.ipynb -> Markdown) |
 | `Sources/Core/Archive/` | `ArchiveListing` (entries SoA, folder tree, text + tokens), `ZipReader` (central directory), `TarReader` (headers, pax/GNU), `Decompress` (gzip/xz streams, single compressed files) |
 | `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline: archives, compressed files, SQLite, notebooks, minified JSON, logs), `SQLitePreview`, `Prewarm` (launch-time warm-up) |
-| `Sources/Preview/` | `main.swift` (starts `Prewarm`, then `NSExtensionMain`), principal class `PreviewViewController`, `AgentClient` |
-| `Sources/App/` | Host app, agent |
-| `Dev/` | `peep-dev` tool: `render`, `bench`, `lexbench`, `parsebench`, `mddump`, `mdbench`, `firstpaint`, `findbench`, `smoke`, `tokens`, `layout`, `types`, `icon` |
-| `Tests/` | Zero-dependency test harness + tests (text, search, lexers, markdown) |
+| `Sources/Preview/` | `main.swift` (starts `Prewarm`, then `NSExtensionMain`), principal class `PreviewViewController`, `AgentClient`, `Diag` (`DIAG=1` builds only) |
+| `Sources/App/` | `HostApp` (setup status, viewer windows), `Agent` (XPC, event tap, link opening, image fetching), `TitleButton` (copy-path button) |
+| `Dev/` | `peep-dev` (`Scripts/dev.sh` with no arguments lists the commands): `Render`, `Checks` (exit 1 on problems), `Bench`, `Dumps`, `Panel` (live Quick Look timing) |
+| `Tests/` | Zero-dependency test harness + tests (text, search, lexers, markdown, archives, notebooks) |
 | `Examples/` | A sample of every supported type for looking at by hand (see its README); binaries come from `Scripts/make-examples.sh` |
 | `Bundle/` | Info.plists, entitlements |
-| `Scripts/` | build/test/dev/profile/signing/type generation |
+| `Scripts/` | build, test, check, dev, compare/baseline, corpus, profile, signing, type/emoji/example generation |
 
 `Core` imports no Foundation (keep it that way: plain Swift + SIMD). `Render` uses AppKit/Core Text.
 
 ## Commands
 
 ```sh
+Scripts/check.sh [--corpus]  # everything that must pass before a commit (see Workflow)
 Scripts/build.sh install     # release build, sign, install to /Applications, register, reload agent
+DIAG=1 Scripts/build.sh install   # + extension diagnostics: main-thread stalls, when QL shows previews
 Scripts/test.sh [filter]     # debug build of Core + Tests, run   (CONFIG=release for -O)
+Scripts/compare.sh renders [--rev R] [files...]     # pixel diff vs a revision (default HEAD)
+Scripts/compare.sh bench [--rev R] <peep-dev args>  # alternating benchmark rounds vs a revision
+Scripts/baseline.sh [rev]    # peep-dev built at a revision (cached in .build/baseline)
+Scripts/make-corpus.sh [N]   # Markdown corpus from package caches into .build/corpus
 Scripts/dev.sh render <file> out.png [--dark] [--size WxH] [--scroll Y] [--select a:b] [--find q] [--wait s]
 Scripts/dev.sh bench <files...>       # pipeline stage timings (best of N)
 Scripts/dev.sh lexbench <file> [N]    # lexer-only throughput
@@ -97,6 +126,8 @@ Scripts/dev.sh jumpbench <files...>        # outline jump cost (scroll + tile dr
 Scripts/dev.sh tilecheck <files...>        # random jumps/overscroll/resizes; visible rect always covered by tiles
 Scripts/dev.sh linkcheck <files.md...>     # every link resolves from a click on it
 Scripts/dev.sh symbols <files...>          # code outline entries as the sidebar shows them
+Scripts/dev.sh imgdiff <a.png> <b.png>     # pixel comparison (exit 1 if they differ)
+Scripts/dev.sh panelwatch [seconds]        # key presses -> Quick Look panel appear/settle times, live
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
@@ -279,7 +310,8 @@ every feature once (~400 MB/s). The block pass (per-line container/leaf dispatch
 largest share of the spec; inline tokenize + emit are next.
 
 The corpus behind these numbers is local (not in the repo): a few hundred .md files from
-package caches and Homebrew, plus the spec. Any parser change must keep `mddump` output
+package caches and Homebrew, plus the spec; `Scripts/make-corpus.sh` gathers one (~1,200
+files) into `.build/corpus`. Any parser change must keep `mddump` output
 identical over such a corpus and over random/mutated documents (or explain each difference
 as a fix with a test), and stay clean under `-sanitize=address`.
 
@@ -343,10 +375,11 @@ as a fix with a test), and stay clean under `-sanitize=address`.
   fonts, glyph tables and lookup tables on a background thread: cold first prepare 9 → 3 ms.
 - Debug-level lines (`--level debug`) include each preview's first paint ("first paint: N
   tiles drawn in X ms, Y ms after setContent") and markdown layout timings.
-- Where the extension's time goes outside our code (stalls between prepare and Quick Look
-  showing the view): a temporary main-thread watchdog (a thread pinging the main queue every
-  5 ms, logging gaps over 40 ms) finds the stalls, `sample <pid> 10 1` while reproducing shows
-  what the main thread waits on. `viewDidAppear` marks when Quick Look shows a preview.
+- Where the extension's time goes outside our code (between prepare and Quick Look showing
+  the preview, stalls while stepping through files): `DIAG=1 Scripts/build.sh install` logs
+  (category `diag`) each prepare's start, when Quick Look shows the preview, main-thread stalls
+  over 40 ms and memory; `peep-dev panelwatch` times key presses against the panel window;
+  `sample <pid> 10 1` while reproducing shows what a stalled main thread waits on.
 - Agent state: `launchctl print gui/$(id -u)/com.lingrino.peep.agent`.
 - Extension registration: `pluginkit -m -v -i com.lingrino.peep.preview` (`+` = enabled).
 - Another QL extension claiming the same types (e.g. Peek) can win; disable it with

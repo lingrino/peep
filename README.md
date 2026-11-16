@@ -34,4 +34,5 @@ receive keystrokes; Peep's small background agent forwards ⌘F and friends).
 
 [Examples](Examples) has a sample of every supported file type to try it on.
 
-Architecture and development notes for contributors (human or AI) are in [AGENTS.md](AGENTS.md).
+`Scripts/check.sh` runs every test and check (about a minute). Architecture and development
+notes for contributors (human or AI) are in [AGENTS.md](AGENTS.md).

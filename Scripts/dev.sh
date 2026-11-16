@@ -1,5 +1,7 @@
 #!/bin/zsh
-# Build the developer tool (Dev/) and run it: Scripts/dev.sh render file.swift /tmp/x.png
+# Build the developer tool (Dev/) if sources changed, and run it (no arguments: the commands).
+#   Scripts/dev.sh render file.swift /tmp/x.png
+#   Scripts/dev.sh --build
 set -euo pipefail
 ROOT=${0:A:h:h}
 cd "$ROOT"
@@ -15,4 +17,5 @@ if [[ ! -x "$OUT/peep-dev" ]] || [[ -n "$(find "${SRC[@]}" -newer "$OUT/peep-dev
   swiftc -sdk "$SDK" -target arm64-apple-macos27.0 -swift-version 6 -module-cache-path "$ROOT/.build/module-cache" \
     "${OPT[@]}" -module-name PeepDev "${SRC[@]}" -o "$OUT/peep-dev"
 fi
+[[ "${1:-}" == --build ]] && exit 0   # build only
 exec "$OUT/peep-dev" "$@"
