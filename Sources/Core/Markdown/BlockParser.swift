@@ -841,12 +841,14 @@ final class BlockParser {
         // "[label]" must be followed by ":". When the label closes on the first line, check
         // that before anything else (link-list items like "[Foo](url)" start with "[").
         var k = f + 1
-        while k < fe {
+        while true {
+            k = findAny(p, k, fe, 0x5C, 0x5B, 0x5D, 0x5D)
+            if k >= fe { break }
             let c = p[k]
             if c == 0x5C { k += 2; continue }
             if c == 0x5B { return }   // unescaped "[" can't appear in a label
-            if c == 0x5D { if k + 1 >= fe || p[k + 1] != 0x3A { return }; break }
-            k += 1
+            if k + 1 >= fe || p[k + 1] != 0x3A { return }   // "]" not followed by ":"
+            break
         }
         // The lines joined with "\n" after each (straight from the source when they are
         // contiguous there), then consecutive definitions parsed from a moving offset.

@@ -164,6 +164,11 @@ let markdownTests: [Test] = [
         expectEqual(MarkdownParser.slugify("Hello, World_2 - x"), "hello-world_2---x")
         expectEqual(MarkdownParser.slugify("Ünïcode Tëst ✓"), "ünïcode-tëst-")
     },
+    Test("md: heading titles trimmed, images as alt text") {
+        // Trimming used to apply only to titles that happened to contain a 0xEF byte.
+        let d = MarkdownParser.parse(TextBuffer("# Title<br>\n## &#32;Two ❄️<br>\n### ![logo](l.png) Name"))
+        expectEqual(d.headings.map(\.title), ["Title", "Two ❄️", "logo Name"])
+    },
     Test("md: headings collected with slugs") {
         let d = MarkdownParser.parse(TextBuffer("# Hello World!\n## Hello World!\n### API `v2`"))
         expectEqual(d.headingSlugs(), ["hello-world", "hello-world-1", "api-v2"])

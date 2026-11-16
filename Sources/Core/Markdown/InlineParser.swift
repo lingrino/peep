@@ -260,7 +260,7 @@ final class InlineParser {
                     let ref = Int32(links.count)
                     let m = strings.count
                     if (p[s] | 0x20) == 0x77 { strings.append("http://") }
-                    strings.append(p + s, e - s)
+                    strings.appendPadded(p + s, e - s)
                     links.append(StrRange(start: Int32(m), end: Int32(strings.count)))
                     add(InlineParser.kLinkOpen, c: ref)
                     text(s, e)
@@ -368,7 +368,7 @@ final class InlineParser {
                     let ref = Int32(links.count)
                     let m = strings.count
                     if a.isEmail { strings.append("mailto:") }
-                    strings.append(p + a.urlStart, a.urlEnd - a.urlStart)
+                    strings.appendPadded(p + a.urlStart, a.urlEnd - a.urlStart)
                     links.append(StrRange(start: Int32(m), end: Int32(strings.count)))
                     add(InlineParser.kLinkOpen, c: ref)
                     text(a.urlStart, a.urlEnd)
@@ -537,7 +537,7 @@ final class InlineParser {
             let ref = Int32(images.count)
             linkText(from: opener)
             let m = strings.count
-            strings.append(UnsafePointer(tmp.p), tmp.count)
+            strings.appendPadded(UnsafePointer(tmp.p), tmp.count)
             var img = MDImageSpec(url: dest, alt: StrRange(start: Int32(m), end: Int32(strings.count)))
             if !pendingDark.isNone { img.dark = pendingDark; pendingDark = .none }
             images.append(img)
@@ -601,17 +601,11 @@ final class InlineParser {
             InlineParser.unescape(p, k + 1, e, into: &strings)
             k = e + 1
         } else {
-            var depth = 0
             let s = k
-            while k < n {
-                let c = p[k]
-                if c == 0x5C && k + 1 < n && InlineParser.isASCIIPunct(p[k + 1]) { k += 2; continue }
-                if c == 0x28 { depth += 1 }
-                else if c == 0x29 { if depth == 0 { break }; depth -= 1 }
-                else if c <= 0x20 { break }
-                k += 1
-            }
-            InlineParser.unescape(p, s, k, into: &strings)
+            let escapes: Bool
+            (k, escapes) = InlineParser.plainDestEnd(p, s, n)
+            if escapes { InlineParser.unescape(p, s, k, into: &strings) }
+            else if k > s { strings.appendPadded(p + s, k - s) }
         }
         let beforeTitle = k
         k = InlineParser.skipWS(p, k, n)
@@ -627,6 +621,46 @@ final class InlineParser {
         return k + 1
     }
 
+    /// End of a destination without `<>` starting at `start`: the first space or control byte,
+    /// or an unbalanced `)`; `\`-escaped punctuation is skipped. Scans 16 bytes at a time
+    /// (URLs are long and plain). `escapes` is true if a `\` or `&` occurs before the end
+    /// (then the destination needs `unescape`).
+    static func plainDestEnd(_ p: UnsafePointer<UInt8>, _ start: Int, _ n: Int) -> (Int, escapes: Bool) {
+        var k = start
+        var depth = 0
+        var escapes = false
+        let space = splat(0x20), bs = splat(0x5C), open = splat(0x28), close = splat(0x29), amp = splat(0x26)
+        while k < n {
+            let v = load16(p + k)
+            let stop = nibbles((v .<= space) .| (v .== bs) .| (v .== open) .| (v .== close))
+            let a = nibbles(v .== amp)
+            if stop == 0 {
+                if a != 0 { escapes = true }   // (possibly past `n`: only costs the slow copy)
+                k &+= 16
+                continue
+            }
+            let lane = stop.trailingZeroBitCount >> 2
+            if a & ((1 << UInt64(4 * lane)) &- 1) != 0 { escapes = true }
+            let j = k + lane
+            if j >= n { return (n, escapes) }
+            let c = p[j]
+            if c == 0x5C {
+                escapes = true
+                k = j + 1 < n && isASCIIPunct(p[j + 1]) ? j + 2 : j + 1
+            } else if c == 0x28 {
+                depth += 1
+                k = j + 1
+            } else if c == 0x29 {
+                if depth == 0 { return (j, escapes) }
+                depth -= 1
+                k = j + 1
+            } else {
+                return (j, escapes)
+            }
+        }
+        return (n, escapes)
+    }
+
     @inline(__always) static func skipWS(_ p: UnsafePointer<UInt8>, _ i: Int, _ n: Int) -> Int {
         var k = i
         while k < n && (p[k] == 0x20 || p[k] == 0x09 || p[k] == 0x0A) { k += 1 }
@@ -634,15 +668,14 @@ final class InlineParser {
     }
 
     /// Resolves backslash escapes and entities in `p[s..<e]` (a destination, title or
-    /// attribute value), appending the result to `buf`.
+    /// attribute value), appending the result to `buf`. `p` is a padded buffer (block input).
     static func unescape(_ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int, into buf: inout ByteBuf) {
-        var k = s
-        while k < e && p[k] != 0x5C && p[k] != 0x26 { k += 1 }
+        var k = findAny(p, s, e, 0x5C, 0x26, 0x5C, 0x26)
         if k == e {   // the common case: no escapes or entities
-            if e > s { buf.append(p + s, e - s) }
+            if e > s { buf.appendPadded(p + s, e - s) }
             return
         }
-        if k > s { buf.append(p + s, k - s) }
+        if k > s { buf.appendPadded(p + s, k - s) }
         while k < e {
             if p[k] == 0x5C && k + 1 < e && isASCIIPunct(p[k + 1]) { buf.append(p[k + 1]); k += 2; continue }
             if p[k] == 0x26, let end = entity(p, k, e, into: &buf) { k = end; continue }

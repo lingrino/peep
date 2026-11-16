@@ -101,11 +101,18 @@ public enum MarkdownParser {
         return doc
     }
 
-    /// Heading text for the outline: images contribute their alt text.
+    /// Heading text for the outline: images contribute their alt text; leading/trailing
+    /// spaces and line breaks (`<br>`) are trimmed.
     static func headingTitle(_ title: String, _ b: MDBlock, _ inl: InlineParser) -> String {
-        // U+FFFC (image placeholder) is EF BF BC in UTF-8; a byte scan is far cheaper than
-        // String.contains (generic Unicode search).
-        if !title.utf8.contains(0xEF) { return title }
+        // U+FFFC (image placeholder) is EF BF BC in UTF-8. Search the bytes: String.contains
+        // is a generic Unicode search, and the Character walk below is slower than parsing the
+        // heading. (Checking for any 0xEF byte also hit every emoji with a variation selector.)
+        let p = inl.out.p + Int(b.textStart), n = Int(b.textEnd - b.textStart)
+        if memmem(p, n, "\u{FFFC}", 3) == nil {
+            // Only a space or newline byte at either end can make a " "/"\n" Character there.
+            if n == 0 || (p[0] != 0x20 && p[0] != 0x0A && p[n - 1] != 0x20 && p[n - 1] != 0x0A) { return title }
+            return title.trimmingSpaces()
+        }
         var alts: [String] = []
         for r in Int(b.runStart)..<inl.runs.count {
             let run = inl.runs[r]
