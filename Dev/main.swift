@@ -246,6 +246,91 @@ func mdbench(_ args: [String]) {
     print(String(format: "parse %.2fms (%.0f MB/s), layout %.2fms", Double(parse) / 1e6, Double(text.count) / Double(parse) * 1e3, Double(layout) / 1e6))
 }
 
+/// Renders the app icon at every iconset size into `dir` (then: iconutil -c icns dir).
+@MainActor
+func icon(_ args: [String]) {
+    let dir = args[0]
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    for base in [16, 32, 128, 256, 512] {
+        for scale in [1, 2] {
+            let px = base * scale
+            let cs = CGColorSpace(name: CGColorSpace.displayP3)!
+            let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            drawIcon(ctx, CGFloat(px))
+            let img = ctx.makeImage()!
+            let rep = NSBitmapImageRep(cgImage: img)
+            let name = scale == 1 ? "icon_\(base)x\(base).png" : "icon_\(base)x\(base)@2x.png"
+            try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: dir + "/" + name))
+        }
+    }
+}
+
+/// The icon: a macOS squircle with a deep indigo gradient and a stylized eye ("peep").
+func drawIcon(_ ctx: CGContext, _ s: CGFloat) {
+    // Apple's grid: the shape is inset ~10% with a continuous-corner radius of ~22.4%.
+    let inset = s * 0.098
+    let rect = CGRect(x: inset, y: inset, width: s - 2 * inset, height: s - 2 * inset)
+    let radius = rect.width * 0.2237
+    let shape = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).cgPath
+    // Drop shadow.
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: 0, height: -s * 0.012), blur: s * 0.03, color: CGColor(gray: 0, alpha: 0.35))
+    ctx.addPath(shape)
+    ctx.setFillColor(CGColor(gray: 0.1, alpha: 1))
+    ctx.fillPath()
+    ctx.restoreGState()
+    // Background gradient.
+    ctx.saveGState()
+    ctx.addPath(shape)
+    ctx.clip()
+    let bg = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.displayP3), colors: [
+        CGColor(red: 0.33, green: 0.30, blue: 0.95, alpha: 1), CGColor(red: 0.12, green: 0.09, blue: 0.42, alpha: 1)] as CFArray,
+        locations: [0, 1])!
+    ctx.drawLinearGradient(bg, start: CGPoint(x: s / 2, y: rect.maxY), end: CGPoint(x: s / 2, y: rect.minY), options: [])
+    // Soft top highlight.
+    let hl = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.displayP3), colors: [
+        CGColor(gray: 1, alpha: 0.22), CGColor(gray: 1, alpha: 0)] as CFArray, locations: [0, 1])!
+    ctx.drawLinearGradient(hl, start: CGPoint(x: s / 2, y: rect.maxY), end: CGPoint(x: s / 2, y: rect.midY), options: [])
+    ctx.restoreGState()
+    // Eye: almond from two arcs.
+    let c = CGPoint(x: s / 2, y: s / 2)
+    let w = rect.width * 0.62, h = rect.width * 0.36
+    let eye = CGMutablePath()
+    eye.move(to: CGPoint(x: c.x - w / 2, y: c.y))
+    eye.addQuadCurve(to: CGPoint(x: c.x + w / 2, y: c.y), control: CGPoint(x: c.x, y: c.y + h))
+    eye.addQuadCurve(to: CGPoint(x: c.x - w / 2, y: c.y), control: CGPoint(x: c.x, y: c.y - h))
+    eye.closeSubpath()
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: 0, height: -s * 0.006), blur: s * 0.02, color: CGColor(gray: 0, alpha: 0.3))
+    ctx.addPath(eye)
+    ctx.setFillColor(CGColor(gray: 0.98, alpha: 1))
+    ctx.fillPath()
+    ctx.restoreGState()
+    // Iris + pupil, clipped to the eye.
+    ctx.saveGState()
+    ctx.addPath(eye)
+    ctx.clip()
+    let r = h * 0.40
+    let iris = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.displayP3), colors: [
+        CGColor(red: 0.20, green: 0.85, blue: 0.95, alpha: 1), CGColor(red: 0.05, green: 0.45, blue: 0.85, alpha: 1)] as CFArray,
+        locations: [0, 1])!
+    ctx.drawRadialGradient(iris, startCenter: CGPoint(x: c.x - r * 0.25, y: c.y + r * 0.25), startRadius: 0,
+                           endCenter: c, endRadius: r, options: [])
+    ctx.setStrokeColor(CGColor(red: 0.03, green: 0.25, blue: 0.55, alpha: 0.9))
+    ctx.setLineWidth(max(1, s * 0.006))
+    ctx.strokeEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
+    ctx.setFillColor(CGColor(red: 0.06, green: 0.05, blue: 0.20, alpha: 1))
+    ctx.fillEllipse(in: CGRect(x: c.x - r * 0.45, y: c.y - r * 0.45, width: r * 0.9, height: r * 0.9))
+    ctx.setFillColor(CGColor(gray: 1, alpha: 0.9))
+    ctx.fillEllipse(in: CGRect(x: c.x + r * 0.08, y: c.y + r * 0.12, width: r * 0.28, height: r * 0.28))
+    ctx.restoreGState()
+    ctx.addPath(eye)
+    ctx.setStrokeColor(CGColor(red: 0.10, green: 0.08, blue: 0.35, alpha: 0.35))
+    ctx.setLineWidth(max(0.5, s * 0.004))
+    ctx.strokePath()
+}
+
 /// Dump markdown layout (blocks, boxes) for debugging.
 @MainActor
 func layoutDump(_ args: [String]) {
@@ -284,6 +369,7 @@ MainActor.assumeIsolated {
     case "types": types(Array(args.dropFirst()))
     case "smoke": smoke(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
+    case "icon": icon(Array(args.dropFirst()))
     default: print("unknown command"); exit(2)
     }
 }
