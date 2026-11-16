@@ -135,6 +135,17 @@ let markdownTests: [Test] = [
             "H1|Doc", "HR|", "P|Text^1^", "P|^1^ Note",
         ])
     },
+    Test("md: consecutive reference definitions") {
+        // Several definitions in one paragraph, then a definition followed by text, then a
+        // paragraph starting with "[" that is not a definition.
+        expectMD("[a] [b] [c]\n\n[a]: /1\n[b]: /2 \"t\"\n  [c]:\n  /3\n\n[d]: /4\ntext [d]\n\n[x] y", [
+            "P|[a](/1) [b](/2) [c](/3)", "P|text [d](/4)", "P|[x] y",
+        ])
+    },
+    Test("md: slugs for ASCII and Unicode headings") {
+        expectEqual(MarkdownParser.slugify("Hello, World_2 - x"), "hello-world_2---x")
+        expectEqual(MarkdownParser.slugify("Ünïcode Tëst ✓"), "ünïcode-tëst-")
+    },
     Test("md: headings collected with slugs") {
         let d = MarkdownParser.parse(TextBuffer("# Hello World!\n## Hello World!\n### API `v2`"))
         expectEqual(d.headings.map(\.slug), ["hello-world", "hello-world-1", "api-v2"])

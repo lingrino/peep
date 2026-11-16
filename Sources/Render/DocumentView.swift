@@ -194,6 +194,13 @@ public final class DocumentView: NSView {
     func updateTiles() {
         guard let c = content, let sv = scrollView else { return }
         let vis = sv.contentView.bounds
+        if vis != cursorRectsFor {
+            // Quick Look's remote window doesn't re-ask for cursor rects after resizes or
+            // scrolls the way a normal window does; without this the I-beam rect keeps the
+            // size of the first (pre-sizing) visible rect, a few hundred points.
+            cursorRectsFor = vis
+            window?.invalidateCursorRects(for: self)
+        }
         let ts = DocumentView.tileSize
         let margin = ts / 2
         let want = vis.insetBy(dx: -margin, dy: -margin).intersection(bounds)
@@ -378,6 +385,7 @@ public final class DocumentView: NSView {
     }
 
     private var pendingLink: String?
+    private var cursorRectsFor = CGRect.null
 
     public override func mouseDragged(with event: NSEvent) {
         guard let c = content else { return }
@@ -399,6 +407,11 @@ public final class DocumentView: NSView {
         pendingLink = nil
     }
 
+    /// One I-beam rect over the visible area. No pointing hand over links: Quick Look's view
+    /// service drops NSCursor.set(), shows the arrow where cursor rects overlap, and applies a
+    /// rect's cursor only when the mouse *enters* it, with exit/enter of adjacent rects in no
+    /// fixed order (so moving between text and link rects often leaves the arrow). Measured
+    /// with NSCursor.currentSystem sampling; see AGENTS.md.
     public override func resetCursorRects() {
         addCursorRect(visibleRect, cursor: .iBeam)
     }

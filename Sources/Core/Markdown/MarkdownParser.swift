@@ -105,7 +105,9 @@ public enum MarkdownParser {
     /// block of a list that doesn't itself sit in a tight list.
     /// Heading text for the outline: images contribute their alt text.
     static func headingTitle(_ title: String, _ b: MDBlock, _ ctx: InlineContext) -> String {
-        if !title.contains("\u{FFFC}") { return title }
+        // U+FFFC (image placeholder) is EF BF BC in UTF-8; a byte scan is far cheaper than
+        // String.contains (generic Unicode search).
+        if !title.utf8.contains(0xEF) { return title }
         var alts = ctx.runs[Int(b.runStart)..<ctx.runs.count].filter { $0.style.contains(.image) && $0.start < b.textEnd }
             .map { ctx.images[Int($0.ref)].alt }.makeIterator()
         var out = ""
@@ -174,6 +176,23 @@ public enum MarkdownParser {
 
     /// GitHub-style heading anchor: lowercase, drop punctuation except - and _, spaces -> -.
     public static func slugify(_ s: String) -> String {
+        // ASCII fast path on bytes (headings are almost always ASCII); Character iteration
+        // does a Unicode property lookup per character.
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(s.utf8.count)
+        for c in s.utf8 {
+            switch c {
+            case 0x41...0x5A: bytes.append(c | 0x20)
+            case 0x61...0x7A, 0x30...0x39, 0x2D, 0x5F: bytes.append(c)
+            case 0x20: bytes.append(0x2D)
+            case 0x80...: return slugifyUnicode(s)
+            default: break
+            }
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    static func slugifyUnicode(_ s: String) -> String {
         var out = ""
         for ch in s.lowercased() {
             if ch.isLetter || ch.isNumber || ch == "-" || ch == "_" { out.append(ch) }

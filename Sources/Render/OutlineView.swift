@@ -11,7 +11,6 @@ final class OutlineView: NSView {
         var line: CTLine?
     }
 
-    private let effect = NSVisualEffectView()
     private let scroll = NSScrollView()
     private let list = OutlineList()
     private(set) var items: [Item] = []
@@ -23,10 +22,9 @@ final class OutlineView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        effect.material = .sidebar
-        effect.blendingMode = .withinWindow
-        effect.state = .active
-        addSubview(effect)
+        // A plain layer color, not NSVisualEffectView: nothing is behind the sidebar to blur,
+        // and the effect view cost ~14ms of compositing in offscreen first-paint measurements.
+        wantsLayer = true
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -40,7 +38,6 @@ final class OutlineView: NSView {
 
     override func layout() {
         super.layout()
-        effect.frame = bounds
         scroll.frame = bounds.insetBy(dx: 0, dy: 0)
         list.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(bounds.height, list.contentHeight))
     }
@@ -74,6 +71,9 @@ final class OutlineView: NSView {
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() { layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
 }
 
 @MainActor

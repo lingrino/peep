@@ -301,7 +301,7 @@ final class BlockParser {
                 emitLeaf(.heading, level: UInt8(lvl))
                 return
             }
-            if leafLines.count == 2, let aligns = tableDelimiter(at, le, headerCells: cellCount(Int(leafLines[0]), Int(leafLines[1]))) {
+            if leafLines.count == 2, isDelimiterCandidate(at, le), let aligns = tableDelimiter(at, le, headerCells: cellCount(Int(leafLines[0]), Int(leafLines[1]))) {
                 leaf = .table
                 tableAligns = aligns
                 return
@@ -688,6 +688,20 @@ final class BlockParser {
     }
 
     /// Parses a delimiter row like `| :-- | :-: | --: |`. Requires the same column count as the header.
+    /// Only `|`, `-`, `:` and blanks, with a `-`. Cheap prefilter run on every paragraph's
+    /// second line, before splitting the header into cells (4% of parse time without it).
+    @inline(__always) func isDelimiterCandidate(_ at: Int, _ le: Int) -> Bool {
+        var dash = false
+        for j in at..<le {
+            switch p[j] {
+            case 0x2D: dash = true
+            case 0x7C, 0x3A, 0x20, 0x09: break
+            default: return false
+            }
+        }
+        return dash
+    }
+
     func tableDelimiter(_ at: Int, _ le: Int, headerCells: Int) -> [MDAlign]? {
         let cells = InlineParser.splitCells(p, at, le)
         if cells.isEmpty || cells.count != headerCells { return nil }
@@ -713,22 +727,40 @@ final class BlockParser {
 
     /// Removes `[label]: destination "title"` definitions from the start of the open paragraph.
     func stripReferenceDefinitions() {
-        while leafLines.count >= 2 {
-            // Join remaining lines (definitions may span lines) as a scratch string.
-            var bytes: [UInt8] = []
-            var lineEnds: [Int] = []
-            for k in stride(from: 0, to: leafLines.count, by: 2) {
-                let s = Int(leafLines[k]), e = Int(leafLines[k + 1])
-                bytes.append(contentsOf: UnsafeBufferPointer(start: p + s, count: e - s))
-                bytes.append(0x0A)
-                lineEnds.append(bytes.count)
-            }
-            guard let (consumed, label, dest, title) = InlineParser.parseReferenceDefinition(bytes) else { return }
-            // Must end at a line boundary.
-            guard let lineIdx = lineEnds.firstIndex(where: { $0 == consumed }) else { return }
-            let key = InlineParser.normalizeLabel(label)
-            if refs[key] == nil { refs[key] = (dest, title) }
-            leafLines.removeFirst((lineIdx + 1) * 2)
+        guard leafLines.count >= 2 else { return }
+        // A definition starts with "[" (after up to 3 spaces). Checking first matters:
+        // building the scratch copy for every paragraph was 22% of parse time.
+        var f = Int(leafLines[0])
+        let fe = Int(leafLines[1])
+        while f < fe && (p[f] == 0x20 || p[f] == 0x09) { f += 1 }
+        if f >= fe || p[f] != 0x5B { return }
+        // Join the lines (definitions may span lines) into one scratch copy, then parse
+        // consecutive definitions from a moving offset (one copy, not one per definition:
+        // changelogs end with hundreds of them).
+        var bytes: [UInt8] = []
+        var lineEnds: [Int] = []
+        for k in stride(from: 0, to: leafLines.count, by: 2) {
+            let s = Int(leafLines[k]), e = Int(leafLines[k + 1])
+            bytes.append(contentsOf: UnsafeBufferPointer(start: p + s, count: e - s))
+            bytes.append(0x0A)
+            lineEnds.append(bytes.count)
         }
+        var off = 0, li = 0, consumedLines = 0
+        bytes.withUnsafeBufferPointer { buf in
+            let b = buf.baseAddress!
+            while off < buf.count {
+                guard let (consumed, label, dest, title) = InlineParser.parseReferenceDefinition(b + off, buf.count - off) else { break }
+                // Must end at a line boundary.
+                let end = off + consumed
+                while li < lineEnds.count && lineEnds[li] < end { li += 1 }
+                guard li < lineEnds.count, lineEnds[li] == end else { break }
+                let key = InlineParser.normalizeLabel(label)
+                if refs[key] == nil { refs[key] = (dest, title) }
+                li += 1
+                consumedLines = li
+                off = end
+            }
+        }
+        leafLines.removeFirst(consumedLines * 2)
     }
 }

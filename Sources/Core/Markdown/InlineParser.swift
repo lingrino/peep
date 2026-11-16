@@ -509,10 +509,8 @@ enum InlineParser {
 
     /// `[label]: dest "title"` at the start of `b`. Returns bytes consumed (through the line
     /// end), label, destination, title.
-    static func parseReferenceDefinition(_ b: [UInt8]) -> (Int, String, String, String)? {
-        b.withUnsafeBufferPointer { buf -> (Int, String, String, String)? in
-            guard let p = buf.baseAddress else { return nil }
-            let n = buf.count
+    static func parseReferenceDefinition(_ p: UnsafePointer<UInt8>, _ n: Int) -> (Int, String, String, String)? {
+        do {
             var k = 0
             while k < n && k < 3 && p[k] == 0x20 { k += 1 }
             guard k < n, p[k] == 0x5B, let close = findLabelEnd(p, k + 1, n), close > k + 1,

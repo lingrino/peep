@@ -42,10 +42,20 @@ final class TextBox: @unchecked Sendable {
         lines = ls
         var b: [CGFloat] = [], x: [CGFloat] = [], t: [CGFloat] = [], bt: [CGFloat] = []
         b.reserveCapacity(ls.count)
+        // Core Text puts a paragraph style's extra line height above *every* line, including
+        // the first, which would give each box dead space at its top (paragraph pitch 3em
+        // instead of ~2.5em). Shift so the first line's top (half the line gap above its
+        // ascent) is the box top.
+        var shift: CGFloat = 0
+        if let l = ls.first {
+            var asc: CGFloat = 0
+            _ = CTLineGetTypographicBounds(l, &asc, nil, nil)
+            shift = (h - origins[0].y) - asc - lineGap / 2
+        }
         for (i, l) in ls.enumerated() {
             var asc: CGFloat = 0, desc: CGFloat = 0, lead: CGFloat = 0
             _ = CTLineGetTypographicBounds(l, &asc, &desc, &lead)
-            let base = origin.y + (h - origins[i].y)
+            let base = origin.y + (h - origins[i].y) - shift
             b.append(base)
             x.append(origin.x + origins[i].x)
             t.append(base - asc - lineGap / 2)
@@ -76,8 +86,17 @@ final class TextBox: @unchecked Sendable {
         }
     }
 
-    /// Moves the box down by `dy` (after parallel layout in block-local coordinates).
-    func translate(_ dy: CGFloat) {
+    private var placedTop: CGFloat = 0
+
+    /// Places the box's block at content-space `top` (boxes are laid out block-local, in
+    /// parallel). Absolute, not relative: a block laid out synchronously is stacked again when
+    /// background layout lands, and translating twice put its text at 2·top.
+    func place(top: CGFloat) {
+        translate(top - placedTop)
+        placedTop = top
+    }
+
+    private func translate(_ dy: CGFloat) {
         if dy == 0 { return }
         rect.origin.y += dy
         for i in baselines.indices {

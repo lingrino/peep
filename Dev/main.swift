@@ -213,6 +213,11 @@ func smoke(_ args: [String]) {
             view.documentView.scrollToTop(y: y)
             view.cacheDisplay(in: view.bounds, to: rep)
         }
+        if let md = doc.content as? MarkdownContent {
+            md.finishLayout()
+            let bad = mdGeometryErrors(md)
+            if !bad.isEmpty { print("GEOMETRY \(f): \(bad.prefix(3).joined(separator: "; "))") }
+        }
         _ = view.find("e")
         view.documentView.selectAll()
         view.cacheDisplay(in: view.bounds, to: rep)
@@ -352,6 +357,9 @@ func layoutDump(_ args: [String]) {
     let d = Document.open(path: args[0])
     guard let md = d.content as? MarkdownContent else { print("not markdown"); return }
     _ = md.layout(width: Double(args.count > 1 ? args[1] : "800") ?? 800)
+    md.finishLayout()   // final geometry (background layout adopted)
+    let bad = mdGeometryErrors(md)
+    if !bad.isEmpty { print("GEOMETRY ERRORS:", bad.prefix(10).joined(separator: "; ")) }
     for (i, b) in md.doc.blocks.enumerated() {
         let lb = md.blocks[i]
         let t = md.doc.text.string(Int(b.textStart), min(Int(b.textEnd), Int(b.textStart) + 40))
@@ -359,6 +367,49 @@ func layoutDump(_ args: [String]) {
               (lb.box0..<(lb.box0 + lb.boxN)).map { k in let r = md.boxes[k].rect; return String(format: "[%.0f,%.0f %.0fx%.0f lines %d]", r.minX, r.minY, r.width, r.height, md.boxes[k].lines.count) }.joined(),
               String(reflecting: t))
     }
+}
+
+/// Main-thread cost of each stage up to the first drawn frame (what Quick Look waits for),
+/// best of N runs. Background layout keeps running and is not counted.
+@MainActor
+func firstPaint(_ args: [String]) {
+    let size = NSSize(width: 980, height: 800)
+    let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+    let view = PreviewView(frame: NSRect(origin: .zero, size: size))
+    window.contentView = view
+    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+    for f in args {
+        var best = [UInt64](repeating: .max, count: 4)
+        for _ in 0..<10 {
+            var t = nanotime()
+            var lap = [UInt64]()
+            func mark() { let n = nanotime(); lap.append(n - t); t = n }
+            let doc = Document.open(path: f); mark()
+            view.show(doc); mark()
+            view.layoutSubtreeIfNeeded(); mark()
+            view.cacheDisplay(in: view.bounds, to: rep); mark()
+            for i in 0..<4 { best[i] = min(best[i], lap[i]) }
+            (doc.content as? MarkdownContent)?.finishLayout()   // don't overlap the next run
+        }
+        let ms = best.map { String(format: "%.2f", Double($0) / 1e6) }
+        print("\((f as NSString).lastPathComponent): open \(ms[0]) show \(ms[1]) layout \(ms[2]) draw \(ms[3]) ms")
+    }
+}
+
+/// Boxes whose line baselines fall outside their rect, or that overlap the next block.
+@MainActor
+func mdGeometryErrors(_ md: MarkdownContent) -> [String] {
+    var out: [String] = []
+    for (k, b) in md.boxes.enumerated() {
+        for y in b.baselines where y < b.rect.minY - 1 || y > b.rect.maxY + 1 {
+            out.append(String(format: "box %d baseline %.0f outside %.0f..%.0f", k, y, b.rect.minY, b.rect.maxY))
+            break
+        }
+    }
+    for i in md.blocks.indices.dropLast() where md.blocks[i].y + md.blocks[i].h > md.blocks[i + 1].y + 0.5 {
+        out.append("block \(i) overlaps next")
+    }
+    return out
 }
 
 @MainActor
@@ -383,6 +434,7 @@ MainActor.assumeIsolated {
     case "layout": layoutDump(Array(args.dropFirst()))
     case "types": types(Array(args.dropFirst()))
     case "smoke": smoke(Array(args.dropFirst()))
+    case "firstpaint": firstPaint(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
     case "parsebench": parsebench(Array(args.dropFirst()))
     case "icon": icon(Array(args.dropFirst()))

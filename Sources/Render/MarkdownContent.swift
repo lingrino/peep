@@ -69,7 +69,6 @@ public final class MarkdownContent: DocumentContent {
         let t0 = nanotime()
         images.start()
         generation &+= 1
-        let gen = generation
         let contentW = min(m.maxWidth, max(200, width - 2 * m.padX))
         let x0 = max(m.padX, ((width - contentW) / 2).rounded())
         let env = LayoutEnv(doc: doc, palette: palette, m: m, fonts: fonts,
@@ -97,18 +96,25 @@ public final class MarkdownContent: DocumentContent {
         lastLayoutNanos = nanotime() - t0
         renderLog.debug("md layout w=\(self.width) sync \(k)/\(n) blocks \(Double(self.lastLayoutNanos) / 1e6)ms")
 
-        // Background: everything after the prefix, in parallel.
-        let job = PendingLayout(first: k, count: n - k, x0: x0, prefix: results[0..<k])
+        // Background: everything after the prefix, in parallel -- started after this main
+        // thread turn, i.e. after the first frame is drawn. The layout threads hold Core
+        // Text's per-font shaping lock most of the time; a first draw competing with them took
+        // 21ms instead of ~3ms (900 KB changelog).
+        let job = PendingLayout(first: k, count: n - k, x0: x0, prefix: results[0..<k], env: env)
         pending = job
-        nonisolated(unsafe) let jobRef = job
-        weak let weakSelf = self
-        nonisolated(unsafe) let owner = weakSelf
-        DispatchQueue.global(qos: .userInitiated).async {
-            jobRef.run(env)
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.start(job) } }
+    }
+
+    private func start(_ job: PendingLayout) {
+        guard pending === job, !job.started else { return }
+        job.started = true
+        let gen = generation
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            job.run()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self = owner, self.generation == gen, self.pending === jobRef else { return }
-                    self.adopt(jobRef)
+                    guard let self, self.generation == gen, self.pending === job else { return }
+                    self.adopt(job)
                     self.onLayoutChanged?()
                 }
             }
@@ -132,7 +138,7 @@ public final class MarkdownContent: DocumentContent {
     /// Blocks until background layout is done and adopts it (exact geometry everywhere).
     public func finishLayout() {
         guard let job = pending else { return }
-        job.wait()
+        if job.started { job.wait() } else { job.started = true; job.run() }   // not started: run here, in parallel
         adopt(job)
         onLayoutChanged?()
     }
@@ -163,7 +169,7 @@ public final class MarkdownContent: DocumentContent {
             }
             let top = y
             let box0 = boxes.count
-            for box in r.boxes { box.translate(top); boxes.append(box) }
+            for box in r.boxes { box.place(top: top); boxes.append(box) }
             for d in r.decos { decos.append(PlacedDeco(minY: d.minY + top, maxY: d.maxY + top, deco: d.deco.offset(top))) }
             y = top + r.height
             maxRight = max(maxRight, r.right)
