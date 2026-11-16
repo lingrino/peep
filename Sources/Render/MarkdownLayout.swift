@@ -339,7 +339,10 @@ enum MarkdownLayout {
         return CTRunDelegateCreate(&cb, p)!
     }
 
-    /// GFM table: natural column widths if they fit, else wide columns shrink (min 80pt).
+    /// GFM table, sized like a browser's automatic table layout: natural (one-line) column
+    /// widths if they fit; else every column keeps at least its longest word and the space
+    /// left is shared in proportion to how much each column would like beyond that. (A fixed
+    /// 80 pt floor squeezed short headers such as "Markdown" until they broke mid-word.)
     static func table(_ env: LayoutEnv, _ ti: Int, x: CGFloat, width: CGFloat, into out: inout BlockLayout) -> CGFloat {
         let t = env.doc.tables[ti]
         let m = env.m
@@ -349,22 +352,50 @@ enum MarkdownLayout {
         let headerFont = env.fonts.font(m.body, weight: .semibold), cellFont = env.fonts.font(m.body)
         var strings: [NSAttributedString] = []
         strings.reserveCapacity(t.cells.count)
+        var lines: [CTLine] = []
+        lines.reserveCapacity(t.cells.count)
         var natural = [CGFloat](repeating: 40, count: cols)
         for (i, c) in t.cells.enumerated() {
             let a = inline(env, c.textStart, c.textEnd, runs: c.runStart..<c.runEnd, font: i < cols ? headerFont : cellFont,
                            color: env.palette.text, align: t.aligns[i % cols], lineHeight: 1.35)
             strings.append(a)
             let line = CTLineCreateWithAttributedString(a)
+            lines.append(line)
             natural[i % cols] = max(natural[i % cols], CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)) + 2 * padH + 1)
         }
         var widths = natural
         let total = natural.reduce(0, +)
         if total > width {
-            let minW: CGFloat = 80
-            let flexible = natural.map { max(0, $0 - minW) }.reduce(0, +)
-            let excess = total - width
-            for c in 0..<cols where natural[c] > minW {
-                widths[c] = max(minW, (natural[c] - excess * (natural[c] - minW) / max(1, flexible)).rounded(.down))
+            // Longest word per column, from the cells' one-line layouts (offsets at spaces: no
+            // extra shaping). Capped so one long token (a URL) can't claim most of the width.
+            let cap = max(80, width * 0.4)
+            var minW = [CGFloat](repeating: 24, count: cols)
+            for (i, line) in lines.enumerated() {
+                let u = strings[i].string.utf16
+                var start = 0, k = 0, longest: CGFloat = 0
+                for ch in u {
+                    if ch == 0x20 || ch == 0x0A || ch == 0x09 {
+                        if k > start {
+                            longest = max(longest, CTLineGetOffsetForStringIndex(line, k, nil) - CTLineGetOffsetForStringIndex(line, start, nil))
+                        }
+                        start = k + 1
+                    }
+                    k += 1
+                }
+                if k > start {
+                    longest = max(longest, CTLineGetOffsetForStringIndex(line, k, nil) - CTLineGetOffsetForStringIndex(line, start, nil))
+                }
+                minW[i % cols] = max(minW[i % cols], min(cap, (longest + 2 * padH + 2).rounded(.up)))
+            }
+            for c in 0..<cols { minW[c] = min(minW[c], natural[c]) }
+            let minTotal = minW.reduce(0, +)
+            if minTotal >= width {
+                widths = minW   // wider than the page: the document scrolls sideways
+            } else {
+                let flexible = (0..<cols).map { natural[$0] - minW[$0] }
+                let flexTotal = max(1, flexible.reduce(0, +))
+                let spare = width - minTotal
+                for c in 0..<cols { widths[c] = (minW[c] + spare * flexible[c] / flexTotal).rounded(.down) }
             }
         }
         let tableW = widths.reduce(0, +)

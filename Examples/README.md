@@ -5,7 +5,7 @@ press **Space** (or use column view, which shows the same preview in its last co
 
 | Folder | What's inside | Try |
 |---|---|---|
-| [Code](Code) | One file per language (45), self-contained | Swift, Go, Rust, Python, TypeScript, C and Java samples are long enough for the **symbol sidebar** |
+| [Code](Code) | One file per language (45), self-contained | The **symbol sidebar** lists each file's declarations; click one to jump to it |
 | [Config](Config) | JSON/JSONC/JSONL, YAML, TOML, INI, `.env`, XML, plist, CSS/SCSS/Less, shell, diff, Makefile, Dockerfile, CMake, lock files, TSV | Special names: `Makefile`, `Dockerfile`, `Gemfile`, `Cargo.lock`, `go.mod` |
 | [Markdown](Markdown) | `Showcase.md` (every feature), `README-style.md` (centered HTML header, badges, details), `Handbook.md` (long, for the table of contents) | Click headings in the sidebar; ⌘F for "Limits" in the handbook |
 | [Wrappers](Wrappers) | `config.yml.dist`, `app.env.example`, `nginx.conf.j2`, `Makefile.in`, `package.json.bak`, ... | Highlighted as the file they wrap |
