@@ -163,12 +163,12 @@ MB/s = 10^6 B/s, the bar in MiB/s = 2^20 B/s, so 930 MiB/s = 975 MB/s):
 | minified jQuery lex | 318 MB/s | — |
 | CommonMark spec (206 KB) parse | 1,610 MB/s | ~930 MiB/s |
 | link-list README (78 KB) parse | 1,140 MB/s | — |
-| 3 KB README (HTML + ref defs) parse | 750 MB/s | 500+ MiB/s |
-| 653 real .md files by size: < 2 KB / 2–8 / 8–64 / ≥ 64 KB | 970 / 1,180 / 1,185 / 1,080 MB/s | 500+ MiB/s (small) |
+| 3 KB README (HTML + ref defs) parse | 800 MB/s | 500+ MiB/s |
+| 653 real .md files by size: < 2 KB / 2–8 / 8–64 / ≥ 64 KB | 1,000 / 1,190 / 1,190 / 1,070 MB/s | 500+ MiB/s (small) |
 
 Both clear the bar. Markdown parsing was ≈3× short (349 MB/s on the spec) until the
 copy-once redesign described under Performance rules (the old parser on the same 653 files:
-212 / 261 / 278 / 289 MB/s). Slowest left: files under ~200 bytes (fixed cost ≈0.3 µs per
+212 / 261 / 280 / 284 MB/s). Slowest left: files under ~200 bytes (fixed cost ≈0.3 µs per
 parse: the document object, two TextBuffers, result arrays), nested-list changelogs (~450 MB/s:
 container matching per line, a block per 10-byte item) and a 1.3 KB kitchen-sink README with
 every feature once (~400 MB/s). The block pass (per-line container/leaf dispatch) is now the
