@@ -155,4 +155,88 @@ let lexTests: [Test] = [
         expectEqual(syms(.kotlin, "@file:Opt(Foo::class)\nclass C {\n  fun f() {}\n}\n"), ["class C", ">f"])
         expectEqual(syms(.python, "class A:\n    def m(self):\n        def inner(): pass\ndef top(): pass\n"), ["class A", ">m", ">>inner", "top"])
     },
+    Test("outline: keywordless members and qualified names") {
+        func syms(_ lang: Language, _ src: String) -> [String] {
+            let t = TextBuffer(src), li = LineIndex(t), tk = TokenStream(expectedBytes: t.count)
+            lang.lex(t.base, 0, t.count, tk)
+            return CodeOutline.symbols(t, li, tk).map { String(repeating: ">", count: $0.level) + $0.title }
+        }
+        // JS/TS: class members (methods, accessors, private, arrow fields), not calls, control
+        // flow, overload signatures or object literals; top-level function bindings.
+        expectEqual(syms(.typescript, """
+            export const load = async (p: string): Promise<C> => {
+            };
+            const total = items.reduce((a, b) => a + b, 0);
+            const obj = { m() { return 1; } };
+            class Store<T> extends Base {
+              #items: T[] = [];
+              onChange = (e: Event) => { this.emit(e); };
+              constructor(private n: string) {
+                if (n) { log(n); }
+              }
+              get size(): number { return 0; }
+              static create<U>(n: string): Store<U> { return new Store<U>(n); }
+              over(x: string): void;
+              over(x: any) {}
+              #check(x: T): boolean { return true; }
+              get(key: string) { return 1; }
+            }
+            interface Shape { area(): number; }
+            """), ["load", "class Store", ">onChange", ">constructor", ">size", ">create", ">over", ">#check", ">get", "interface Shape"])
+        expectEqual(syms(.javascript, "#!/usr/bin/env node\nconst throttle = (fn) => {};\nlet id = x => x;\nvar f = function () {};\n"),
+                    ["throttle", "id", "f"])
+        // Swift: initializers named with their argument labels; `.init(` calls aren't declarations.
+        expectEqual(syms(.swift, """
+            struct S {
+                init(name: String, count: Int = 0) { let s = S.init(name: "x", count: 1) }
+                init?(_ d: [String: Any]) {}
+                deinit {}
+                subscript(index: Int) -> Int { 0 }
+            }
+            """), ["struct S", ">init(name:count:)", ">init?(_:)", ">deinit", ">subscript(index:)"])
+        // Rust impl blocks (not `-> impl Trait`), Ruby/Lua/Kotlin/Perl qualified names.
+        expectEqual(syms(.rust, "impl fmt::Display for P {\n    fn fmt(&self) {}\n}\nfn it() -> impl Iterator<Item = u8> {}\n"),
+                    ["impl fmt::Display for P", ">fmt", "it"])
+        expectEqual(syms(.ruby, "class A::B\n  def self.create; end\nend\n"), ["class A::B", ">self.create"])
+        expectEqual(syms(.lua, "function M.new() end\nfunction M:value() end\n"), ["M.new", "M:value"])
+        expectEqual(syms(.kotlin, "fun String.isEmail(): Boolean = true\nfun <T> List<T>.second(): T = this[1]\n"),
+                    ["String.isEmail", "List<T>.second"])
+        expectEqual(syms(.perl, "sub My::Pkg::helper { }\n"), ["My::Pkg::helper"])
+        // Keywords as names (`def match(`) and as modifiers (`type alias`).
+        expectEqual(syms(.python, "def match(self): pass\n"), ["match"])
+        expectEqual(syms(.elm, "type alias Model = Int\nupdate : Msg -> Int\nupdate msg m = m\n"), ["type alias Model", "update"])
+        // C#: expression bodies and records; switch-arm patterns and base calls aren't definitions.
+        expectEqual(syms(.csharp, """
+            record Circle(double R) : Shape("c")
+            {
+                public override string ToString() => "c";
+                string D(object o) => o switch { Point(0, 0) => "o", _ => "x" };
+            }
+            """), ["record Circle", ">ToString", ">D"])
+        // C++: operators, destructors, qualified definitions, initializer lists.
+        expectEqual(syms(.cpp, """
+            class M {
+              ~M() {}
+              M operator*(const M& o) const { return o; }
+              double& operator()(int r) { return d; }
+            };
+            M::M(int n)
+                : n_(n),
+                  d_{n} {
+            }
+            void M::resize(int n) {}
+            """), ["class M", ">~M", ">operator*", ">operator()", "M::M", "M::resize"])
+        // Column-0 declarations: Haskell signatures, Erlang clauses (one entry), assembly labels.
+        expectEqual(syms(.haskell, "main :: IO ()\nmain = print 1\ndata T = A | B\n"), ["main", "data T"])
+        expectEqual(syms(.erlang, "-module(m).\nloop(0) -> ok;\nloop(N) -> loop(N - 1).\n"), ["loop"])
+        expectEqual(syms(.assembly, "_main:\n    ret\nmsg: .ascii \"x\"\n"), ["_main", "msg"])
+        // SQL: only after CREATE; HCL blocks; Objective-C; Fortran `end function` closes.
+        expectEqual(syms(.sql, "CREATE TABLE IF NOT EXISTS users (id INT);\nALTER TABLE users ADD x INT;\ncreate view v as select 1;\n"),
+                    ["TABLE users", "view v"])
+        expectEqual(syms(.hcl, "terraform {\n}\nresource \"aws_s3_bucket\" \"a\" {\n  tags = { x = 1 }\n}\n"),
+                    ["terraform", "resource aws_s3_bucket a"])
+        expectEqual(syms(.objc, "@interface G : NSObject\n- (int)hi:(int)h;\n@end\n@implementation G\n- (int)hi:(int)h {\n  return h;\n}\n@end\n"),
+                    ["@interface G", "@implementation G", "hi:"])
+        expectEqual(syms(.fortran, "module m\ncontains\n  function f(x)\n  end function f\nend module m\n"), ["module m", ">f"])
+    },
 ]

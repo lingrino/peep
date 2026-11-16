@@ -9,6 +9,9 @@ public final class KeywordTable: @unchecked Sendable {
         public static let declaresFunction: UInt8 = 0x40
         /// The next identifier names a type being declared (`class`, `struct`, `enum`).
         public static let declaresType: UInt8 = 0x80
+        /// The keyword is itself the declaration (both bits): Swift `init`/`deinit`/
+        /// `subscript`, `constructor`, Rust `impl` blocks.
+        public static let declaresItself: UInt8 = 0xC0
         public static let kindMask: UInt8 = 0x3F
     }
 

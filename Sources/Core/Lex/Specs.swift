@@ -4,11 +4,13 @@
 //   K  = keyword            D = declares a function (next identifier = function name)
 //   T  = declares a type     C = constant (true/false/nil)     B = builtin (self/this)
 //   Y  = builtin type names (int, bool...; lowercase types the capitalization rule misses)
+//   S  = a keyword that is itself a declaration (`init`, `constructor`, Rust `impl` blocks)
 // Each spec is a lazily-built global (`static let`): only languages actually previewed pay.
 
 private let K = TokenKind.keyword.rawValue
 private let D = TokenKind.keyword.rawValue | KeywordTable.Hint.declaresFunction
 private let T = TokenKind.keyword.rawValue | KeywordTable.Hint.declaresType
+private let S = TokenKind.keyword.rawValue | KeywordTable.Hint.declaresItself
 private let C = TokenKind.constant.rawValue
 private let B = TokenKind.builtin.rawValue
 private let Y = TokenKind.type.rawValue
@@ -16,7 +18,8 @@ private let P = TokenKind.preprocessor.rawValue
 
 public enum Specs {
     public static let swift = CLikeSpec(keywords: KeywordTable([
-        (K, "associatedtype deinit fileprivate import init inout internal let open operator private precedencegroup public rethrows static subscript var break case catch continue default defer do else fallthrough for guard if in repeat return throw switch where while as is try await async throws any some nonisolated isolated consuming borrowing sending package indirect lazy mutating nonmutating override required convenience dynamic final optional weak unowned get set willSet didSet macro each repeat discard copy consume"),
+        (S, "init deinit subscript"),
+        (K, "associatedtype fileprivate import inout internal let open operator private precedencegroup public rethrows static var break case catch continue default defer do else fallthrough for guard if in repeat return throw switch where while as is try await async throws any some nonisolated isolated consuming borrowing sending package indirect lazy mutating nonmutating override required convenience dynamic final optional weak unowned get set willSet didSet macro each repeat discard copy consume"),
         (D, "func"),
         (T, "class struct enum protocol extension actor typealias"),
         (C, "true false nil"),
@@ -41,23 +44,27 @@ public enum Specs {
     ])) { s in s.hashPreprocessor = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 1 }
 
     public static let cpp = CLikeSpec(keywords: KeywordTable([
-        (K, cKeywords + " catch co_await co_return co_yield concept consteval constinit const_cast decltype delete dynamic_cast explicit export final friend mutable namespace new noexcept operator override private protected public reinterpret_cast requires static_cast template throw try typeid typename using virtual and or not xor and_eq or_eq not_eq bitand bitor compl import module"),
+        (S, "operator"),
+        (K, cKeywords + " catch co_await co_return co_yield concept consteval constinit const_cast decltype delete dynamic_cast explicit export final friend mutable namespace new noexcept override private protected public reinterpret_cast requires static_cast template throw try typeid typename using virtual and or not xor and_eq or_eq not_eq bitand bitor compl import module"),
         (T, "class struct"), (Y, cTypes + " char8_t char16_t char32_t auto"),
         (C, "NULL true false nullptr"), (B, "this std"),
     ])) { s in s.hashPreprocessor = true; s.cppRawStrings = true; s.capitalizedTypes = false; s.keywordlessDefinitionDepth = 3 }
 
     public static let objc = CLikeSpec(keywords: KeywordTable([
-        (K, cKeywords + " interface implementation end protocol property synthesize dynamic optional required class selector encode synchronized try catch finally throw autoreleasepool import package private public protected nonatomic atomic strong weak copy assign readonly readwrite nullable nonnull __block __weak __strong instancetype in out inout oneway bycopy byref"),
-        (T, "struct"), (Y, cTypes + " id BOOL SEL IMP Class NSInteger NSUInteger CGFloat"),
+        (K, cKeywords + " end property synthesize dynamic optional required class selector encode synchronized try catch finally throw autoreleasepool import package private public protected nonatomic atomic strong weak copy assign readonly readwrite nullable nonnull __block __weak __strong instancetype in out inout oneway bycopy byref"),
+        (T, "struct interface implementation protocol"), (Y, cTypes + " id BOOL SEL IMP Class NSInteger NSUInteger CGFloat"),
         (C, "NULL nil Nil YES NO true false"), (B, "self super"),
-    ])) { s in s.hashPreprocessor = true; s.atKeywords = true; s.keywordlessDefinitionDepth = 1 }
+    ])) { s in s.hashPreprocessor = true; s.atKeywords = true; s.keywordlessDefinitionDepth = 1; s.objcMethods = true }
 
     public static let csharp = CLikeSpec(keywords: KeywordTable([
         (K, "abstract as base break case catch checked const continue default delegate do else event explicit extern finally fixed for foreach goto if implicit in internal is lock namespace new operator out override params private protected public readonly ref return sealed sizeof stackalloc static switch throw try typeof unchecked unsafe using virtual volatile while add alias ascending async await by descending dynamic equals from get global group init into join let nameof notnull on orderby partial remove select set unmanaged value var when where with yield required scoped file"),
         (T, "class struct interface enum record"),
         (Y, "bool byte char decimal double float int long object sbyte short string uint ulong ushort void nint nuint"),
         (C, "true false null"), (B, "this"),
-    ])) { s in s.hashPreprocessor = true; s.csharpStrings = true; s.tripleQuotes = true; s.keywordlessDefinitionDepth = 3 }
+    ])) { s in
+        s.hashPreprocessor = true; s.csharpStrings = true; s.tripleQuotes = true
+        s.keywordlessDefinitionDepth = 3; s.arrowBodies = true
+    }
 
     public static let java = CLikeSpec(keywords: KeywordTable([
         // module-info words (exports, open, requires, to, with, ...) are left out: they're
@@ -69,7 +76,8 @@ public enum Specs {
     ])) { s in s.atAttribute = true; s.tripleQuotes = true; s.keywordlessDefinitionDepth = 2 }
 
     public static let kotlin = CLikeSpec(keywords: KeywordTable([
-        (K, "as break continue do else for if in is return throw try catch finally when while by constructor delegate dynamic field file get import init param property receiver set setparam where actual abstract annotation companion const crossinline data enum expect external final infix inline inner internal lateinit noinline open operator out override private protected public reified sealed suspend tailrec vararg package typealias val var value"),
+        (S, "constructor"),
+        (K, "as break continue do else for if in is return throw try catch finally when while by delegate dynamic field file get import init param property receiver set setparam where actual abstract annotation companion const crossinline data enum expect external final infix inline inner internal lateinit noinline open operator out override private protected public reified sealed suspend tailrec vararg package typealias val var value"),
         (D, "fun"), (T, "class interface object"),
         (C, "true false null"), (B, "this super it"),
     ])) { s in
@@ -103,6 +111,7 @@ public enum Specs {
     ])) { s in
         s.atAttribute = true; s.tripleQuotes = true; s.singleQuote = .string
         s.interpolation = .dollarBrace; s.dollarIdentInterp = true
+        s.keywordlessDefinitionDepth = 2; s.arrowBodies = true   // `void f() {`, `int get() => x;`
     }
 
     public static let go = CLikeSpec(keywords: KeywordTable([
@@ -114,7 +123,8 @@ public enum Specs {
     ])) { s in s.backtick = .raw; s.capitalizedTypes = false; s.goReceivers = true }
 
     public static let rust = CLikeSpec(keywords: KeywordTable([
-        (K, "as async await break const continue crate dyn else extern for if impl in let loop match mod move mut pub ref return static unsafe use where while yield box macro_rules union"),
+        (S, "impl"),
+        (K, "as async await break const continue crate dyn else extern for if in let loop match mod move mut pub ref return static unsafe use where while yield box macro_rules union"),
         (D, "fn"), (T, "struct enum trait type"),
         (Y, "i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str"),
         (C, "true false None Some Ok Err"), (B, "self Self super"),
@@ -137,7 +147,8 @@ public enum Specs {
         (K, jsKeywords), (D, "function"), (T, "class"), (C, jsConstants), (B, "this super arguments globalThis"),
     ])) { s in
         s.singleQuote = .string; s.backtick = .template; s.regexLiterals = true
-        s.chars = ByteClass(extraStart: "$"); s.atAttribute = true
+        s.chars = ByteClass(extraStart: "$#"); s.atAttribute = true   // `#private` names
+        s.jsDeclarations = true
     }
 
     public static let typescript = CLikeSpec(keywords: KeywordTable([
@@ -147,7 +158,8 @@ public enum Specs {
         (C, jsConstants), (B, "this super arguments globalThis"),
     ])) { s in
         s.singleQuote = .string; s.backtick = .template; s.regexLiterals = true
-        s.chars = ByteClass(extraStart: "$"); s.atAttribute = true
+        s.chars = ByteClass(extraStart: "$#"); s.atAttribute = true   // `#private` names
+        s.jsDeclarations = true
     }
 
     public static let python = CLikeSpec(keywords: KeywordTable([
@@ -203,7 +215,7 @@ public enum Specs {
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.hashComment = true; s.singleQuote = .string
         s.multilineStrings = true; s.backtick = .identifier; s.capitalizedTypes = false
-        s.chars = ByteClass(extraIdent: ".")
+        s.chars = ByteClass(extraIdent: "."); s.lineStart = .assignedFunction   // `name <- function(`
     }
 
     public static let julia = CLikeSpec(keywords: KeywordTable([
@@ -216,44 +228,49 @@ public enum Specs {
     }
 
     public static let sql = CLikeSpec(keywords: KeywordTable([
-        (K, "add all alter and any as asc authorization backup begin between break by cascade case check checkpoint close clustered coalesce collate column commit compute constraint contains continue convert create cross current current_date current_time current_timestamp current_user cursor database deallocate declare default delete deny desc disk distinct distributed double drop dump else end errlvl escape except exec execute exists exit external fetch file fillfactor for foreign freetext from full function goto grant group having holdlock identity if in index inner insert intersect into is join key kill left like limit lineno load merge national natural nocheck nonclustered not null nullif of off offset offsets on open option or order outer over percent pivot plan primary print proc procedure public raiserror read readtext reconfigure references replace replication restore restrict return returning returns revert revoke right rollback rowcount rule save schema select session_user set setuser show shutdown some statistics table tablesample then to top tran transaction trigger truncate try_convert union unique unpivot update updatetext use user using values varying view waitfor when where while with within writetext window recursive lateral materialized temporary temp if exists returning conflict do nothing upsert pragma explain analyze vacuum"),
+        (K, "add all alter and any as asc authorization backup begin between break by cascade case check checkpoint close clustered coalesce collate column commit compute constraint contains continue convert create cross current current_date current_time current_timestamp current_user cursor deallocate declare default delete deny desc disk distinct distributed double drop dump else end errlvl escape except exec execute exists exit external fetch file fillfactor for foreign freetext from full goto grant group having holdlock identity if in inner insert intersect into is join key kill left like limit lineno load merge national natural nocheck nonclustered not null nullif of off offset offsets on open option or order outer over percent pivot plan primary print public raiserror read readtext reconfigure references replace replication restore restrict return returning returns revert revoke right rollback rowcount rule save select session_user set setuser show shutdown some statistics tablesample then to top tran transaction truncate try_convert union unique unpivot update updatetext use user using values varying waitfor when where while with within writetext window recursive lateral materialized temporary temp if exists returning conflict do nothing upsert pragma explain analyze vacuum"),
+        (T, "table view function procedure proc index trigger schema sequence database type"),   // after CREATE
         (Y, "int integer smallint bigint tinyint decimal numeric float real double precision char varchar nchar nvarchar text ntext date time timestamp timestamptz datetime interval boolean bool blob bytea json jsonb uuid serial bigserial money xml array"),
         (C, "true false null"),
     ], caseInsensitive: true)) { s in
         s.slashSlash = false; s.dashDashComment = true; s.singleQuote = .string
-        s.multilineStrings = true; s.backtick = .identifier; s.capitalizedTypes = false
+        s.multilineStrings = true; s.backtick = .identifier; s.capitalizedTypes = false; s.sqlCreate = true
     }
 
     public static let haskell = CLikeSpec(keywords: KeywordTable([
-        (K, "case class data default deriving do else foreign if import in infix infixl infixr instance let module newtype of then type where forall qualified as hiding family mdo rec proc"),
+        (K, "case default deriving do else foreign if import in infix infixl infixr instance let module of then where forall qualified as hiding family mdo rec proc"),
+        (T, "data newtype type class"),
         (C, "True False Nothing Just Left Right"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.dashDashComment = true; s.haskellBlockComment = true
-        s.singleQuote = .none; s.chars = ByteClass(extraIdent: "'")
+        s.singleQuote = .none; s.chars = ByteClass(extraIdent: "'"); s.lineStart = .signature   // `name :: T`
     }
 
     public static let elm = CLikeSpec(keywords: KeywordTable([
-        (K, "if then else case of let in type alias module exposing import as port effect where"),
+        (K, "if then else case of let in alias module exposing import as port effect where"),
+        (T, "type"),
         (C, "True False Nothing Just"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.dashDashComment = true; s.haskellBlockComment = true
-        s.tripleQuotes = true; s.singleQuote = .char
+        s.tripleQuotes = true; s.singleQuote = .char; s.lineStart = .signature   // `name : T`
     }
 
     public static let ocaml = CLikeSpec(keywords: KeywordTable([
-        (K, "and as assert begin class constraint do done downto else end exception external for fun function functor if in include inherit initializer lazy let match method module mutable new nonrec object of open or private rec sig struct then to try type val virtual when while with"),
+        (K, "and as assert begin class constraint do done downto else end exception external for fun function functor if in include inherit initializer lazy let match method mutable new nonrec object of open or private rec sig struct then to try val virtual when while with"),
+        (T, "type module"),
         (C, "true false None Some"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.ocamlBlockComment = true; s.singleQuote = .none
-        s.multilineStrings = true; s.chars = ByteClass(extraIdent: "'")
+        s.multilineStrings = true; s.chars = ByteClass(extraIdent: "'"); s.lineStartLet = true
     }
 
     public static let fsharp = CLikeSpec(keywords: KeywordTable([
-        (K, "abstract and as assert base begin class default delegate do done downcast downto elif else end exception extern for fun function global if in inherit inline interface internal lazy let match member module mutable namespace new not of open or override private public rec return select sig static struct then to try type upcast use val void when while with yield"),
+        (K, "abstract and as assert base begin class default delegate do done downcast downto elif else end exception extern for fun function global if in inherit inline interface internal lazy let match mutable namespace new not of open or override private public rec return select sig static struct then to try upcast use val void when while with yield"),
+        (D, "member"), (T, "type module"),
         (C, "true false null None Some"), (B, "this"),
     ])) { s in
         s.slashStar = false; s.ocamlBlockComment = true; s.tripleQuotes = true; s.singleQuote = .char
-        s.atAttribute = false
+        s.atAttribute = false; s.lineStartLet = true
     }
 
     public static let elixir = CLikeSpec(keywords: KeywordTable([
@@ -271,7 +288,7 @@ public enum Specs {
         (C, "true false undefined ok error"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.percentComment = true; s.singleQuote = .string
-        s.capitalizedTypes = false
+        s.capitalizedTypes = false; s.lineStart = .clause   // `name(Args) ->`
     }
 
     public static let nix = CLikeSpec(keywords: KeywordTable([
@@ -283,7 +300,8 @@ public enum Specs {
     }
 
     public static let hcl = CLikeSpec(keywords: KeywordTable([
-        (K, "resource data variable output locals module provider terraform for in if else endif endfor dynamic content each count depends_on for_each lifecycle"),
+        (S, "resource data variable output locals module provider terraform"),   // top-level blocks
+        (K, "for in if else endif endfor dynamic content each count depends_on for_each lifecycle"),
         (C, "true false null"),
     ])) { s in
         s.hashComment = true; s.interpolation = .dollarBrace; s.multilineStrings = false
@@ -314,8 +332,8 @@ public enum Specs {
     ])) { s in s.hashPreprocessor = true; s.capitalizedTypes = false; s.atAttribute = false }
 
     public static let solidity = CLikeSpec(keywords: KeywordTable([
-        (K, "abstract anonymous as assembly break catch constant continue constructor delete do else emit enum event external fallback for if immutable import indexed internal is library mapping memory modifier new override payable pragma private public pure receive return returns revert storage try type unchecked using view virtual while"),
-        (D, "function"), (T, "contract interface struct"),
+        (K, "abstract anonymous as assembly break catch constant continue delete do else emit enum external fallback for if immutable import indexed internal is library mapping memory new override payable pragma private public pure receive return returns revert storage try type unchecked using view virtual while"),
+        (S, "constructor"), (D, "function modifier event"), (T, "contract interface struct"),
         (Y, "address bool string bytes int uint byte"), (C, "true false"), (B, "this msg block tx"),
     ])) { s in s.singleQuote = .string }
 
@@ -324,11 +342,11 @@ public enum Specs {
         (D, "function"), (T, "class struct interface union"),
         (Y, "bool byte ubyte short ushort int uint long ulong float double real char wchar dchar string void size_t"),
         (C, "true false null"), (B, "this"),
-    ])) { s in s.nestedBlockComments = true; s.backtick = .raw }
+    ])) { s in s.nestedBlockComments = true; s.backtick = .raw; s.keywordlessDefinitionDepth = 2 }
 
     public static let nim = CLikeSpec(keywords: KeywordTable([
-        (K, "addr and as asm bind block break case cast concept const continue converter defer discard distinct div do elif else end enum except export finally for from func if import in include interface is isnot iterator let macro method mixin mod nil not notin object of or out ptr raise ref return shl shr static template try tuple type using var when while xor yield"),
-        (D, "proc func method iterator template macro converter"), (C, "true false nil"),
+        (K, "addr and as asm bind block break case cast concept const continue defer discard distinct div do elif else end enum except export finally for from if import in include interface is isnot let mixin mod nil not notin object of or out ptr raise ref return shl shr static try tuple using var when while xor yield"),
+        (D, "proc func method iterator template macro converter"), (T, "type"), (C, "true false nil"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.hashComment = true; s.tripleQuotes = true; s.singleQuote = .char
     }
@@ -353,17 +371,22 @@ public enum Specs {
     public static let vim = CLikeSpec(keywords: KeywordTable([
         (K, "if else elseif endif for endfor while endwhile try catch finally endtry return let unlet call execute set setlocal autocmd augroup command map nmap vmap imap noremap nnoremap vnoremap inoremap source runtime syntax highlight hi filetype echo"),
         (D, "function function! def"),
-    ])) { s in s.slashSlash = false; s.slashStar = false; s.singleQuote = .string; s.capitalizedTypes = false }
+    ])) { s in
+        s.slashSlash = false; s.slashStar = false; s.singleQuote = .string; s.capitalizedTypes = false
+        s.chars = ByteClass(extraIdent: "!:#")   // `function!`, `s:name`, `a:arg`, `pkg#func`
+    }
 
     public static let assembly = CLikeSpec(keywords: KeywordTable([
         (K, "mov add sub mul div inc dec cmp jmp je jne jz jnz jg jl call ret push pop lea and or xor not shl shr nop int ldr str stp ldp bl b cbz cbnz adrp br blr movz movk"),
     ], caseInsensitive: true)) { s in
         s.slashSlash = true; s.slashStar = true; s.semicolonComment = true; s.hashComment = false
         s.singleQuote = .char; s.capitalizedTypes = false; s.chars = ByteClass(extraStart: ".%")
+        s.lineStart = .label
     }
 
     public static let lisp = CLikeSpec(keywords: KeywordTable([
-        (K, "defun defmacro defvar defparameter defconst defn defn- def defmethod defrecord defprotocol defstruct deftype defmulti ns let let* letfn lambda fn if when unless cond case do progn loop recur and or not quote setq setf require import use"),
+        (K, "defvar defparameter defconst def let let* letfn lambda fn if when unless cond case do progn loop recur and or not quote setq setf require import use"),
+        (D, "defun defmacro defn defn- defmethod defmulti defgeneric"), (T, "defrecord defprotocol defstruct deftype defclass ns"),
         (C, "nil t true false"),
     ])) { s in
         s.slashSlash = false; s.slashStar = false; s.semicolonComment = true; s.singleQuote = .none
@@ -372,12 +395,14 @@ public enum Specs {
     }
 
     public static let pascal = CLikeSpec(keywords: KeywordTable([
-        (K, "and array as asm begin case class const constructor destructor div do downto else end except exports file finalization finally for function goto if implementation in inherited initialization inline interface is label library mod nil not object of or packed procedure program property raise record repeat resourcestring set shl shr string then threadvar to try type unit until uses var while with xor"),
+        (K, "and array as asm begin case class const div do downto else end except exports file finalization finally for goto if implementation in inherited initialization inline interface is label library mod nil not object of or packed property raise record repeat resourcestring set shl shr string then threadvar to try type until uses var while with xor"),
+        (D, "procedure function constructor destructor"), (T, "program unit"),
         (C, "true false nil"),
     ], caseInsensitive: true)) { s in s.slashStar = false; s.ocamlBlockComment = true; s.singleQuote = .string }
 
     public static let fortran = CLikeSpec(keywords: KeywordTable([
-        (K, "program end subroutine function module use implicit none integer real double precision complex logical character dimension allocatable intent in out inout parameter call do if then else elseif endif enddo return stop contains type select case where while"),
+        (K, "end use implicit none integer real double precision complex logical character dimension allocatable intent in out inout parameter call do if then else elseif endif enddo return stop contains type select case where while"),
+        (D, "subroutine function"), (T, "program module"),
         (C, ".true. .false."),
     ], caseInsensitive: true)) { s in
         s.slashSlash = false; s.slashStar = false; s.singleQuote = .string; s.capitalizedTypes = false

@@ -61,6 +61,26 @@ public final class CLikeSpec: @unchecked Sendable {
     public var keywordlessDefinitionDepth = -1
     /// Go method receivers: `func (r *T) Name` declares `Name` (gofmt puts a space after func).
     public var goReceivers = false
+    /// Keywordless definitions may have an expression body: `int f() => x;` (Dart, C#).
+    public var arrowBodies = false
+    /// JS/TS: members of class bodies (`name(...) {`, `name = (...) =>`) and top-level
+    /// `const name = (...) =>` / `= function` bindings are declarations.
+    public var jsDeclarations = false
+    /// Declarations recognized by a name at the start of a line (column 0).
+    public enum LineStart: Sendable {
+        case none
+        case signature         // `name :: Type` (Haskell), `name : Type` (Elm)
+        case clause            // `name(Args) ->` (Erlang)
+        case label             // `name:` (assembly)
+        case assignedFunction  // `name <- function(` (R)
+    }
+    public var lineStart = LineStart.none
+    /// `let` at column 0 declares (OCaml, F#).
+    public var lineStartLet = false
+    /// `table`/`view`/`function`... declare only after `create` (SQL).
+    public var sqlCreate = false
+    /// `- (type)selector` / `+ ...` at line start, `@interface Name` (Objective-C).
+    public var objcMethods = false
 
     public init(keywords: KeywordTable, _ configure: (CLikeSpec) -> Void = { _ in }) {
         self.keywords = keywords
@@ -89,6 +109,22 @@ public enum CLike {
         var parens = 0
         var receiverBase = -1    // Go: paren depth at `func (`, then the name follows `)`
         var receiverAt = 0
+        var qualStart = -1       // `def self.name`, `function M.name`: where the full name starts
+        var classBodies: UInt64 = 0   // JS/TS: bit d set = brace depth d is a class body
+        var inClassBody = false       // the current brace depth is a class body (members here)
+        var pendingClass = false      // `class` seen, the `{` of its body not yet
+        var classParens = 0           // `(` depth where the last class body opened
+        var sawCreate = false         // SQL: in a `CREATE ...` statement
+        // Spec options read per identifier, in locals: a class's stored properties are
+        // reloaded after every opaque call (each token append), locals stay in registers.
+        let lineRule = s.lineStart, lineRuleOn = s.lineStart != .none
+        let jsDecl = s.jsDeclarations, kwlDepth = s.keywordlessDefinitionDepth, arrows = s.arrowBodies
+        let capTypes = s.capitalizedTypes, macroBang = s.macroBang
+
+        // `#!` line, before '#' can start a name (JS private fields).
+        if start == 0 && closer == 0 && p[0] == 0x23 && p[1] == 0x21 {
+            i = lineEnd(p, 0, end); out.add(0, i, .comment)
+        }
 
         while i < end {
             let b = p[i]
@@ -113,7 +149,63 @@ public enum CLike {
 
                 var kind = TokenKind.plain
                 var newHint: UInt8 = 0
-                let kw = prev == 0x2E ? 0 : s.keywords.lookup(p + st, len)
+                var kw = prev == 0x2E ? 0 : s.keywords.lookup(p + st, len)
+                var keepHint = false
+                // Rare cases, behind one test: most identifiers follow no declaring keyword,
+                // aren't in a JS class body and the language has no column-0 rule.
+                if hint != 0 || inClassBody || (lineRuleOn && (st == start || p[st - 1] == newline)) {
+                    // A keyword right after a declaring one: the declared name when parameters
+                    // follow (`def match(`, `def print(`), else a modifier that keeps the hint
+                    // (`type alias Model`, `let rec f`, `CREATE TABLE IF NOT EXISTS t`).
+                    if kw != 0 && hint != 0 && kw & KeywordTable.Hint.declaresItself == 0 {
+                        if hint == KeywordTable.Hint.declaresFunction && nextSignificant(p, i, end) == 0x28 { kw = 0 }
+                        else if kw & KeywordTable.Hint.kindMask == TokenKind.keyword.rawValue { keepHint = true }
+                        else if hint == KeywordTable.Hint.declaresType { kw = 0 }
+                    }
+                    // OCaml type parameters: `type 'a tree` declares `tree`.
+                    if hint == KeywordTable.Hint.declaresType && st > start && p[st - 1] == apos {
+                        prev = p[i - 1]
+                        continue
+                    }
+                    // Declarations found by a name in column 0.
+                    if lineRuleOn && kw == 0 && hint == 0 && (st == start || p[st - 1] == newline)
+                        && lineStartDeclares(lineRule, p, i, end) {
+                        out.add(st, i, lineRule == .label ? .label : .function)
+                        out.addSymbol(st, i, .function, titleStart: st)
+                        prev = p[i - 1]; prevKeyword = false
+                        continue
+                    }
+                    // JS/TS class members: methods (also ones named like keywords: `get(key) {`)
+                    // and arrow-function fields. Only identifiers directly in a class body that
+                    // can start a member: after `{` `}` `;`, a decorator's `)`, `*` or a
+                    // modifier (not parameter names or types: rescanning those was 25%).
+                    if inClassBody && parens == classParens
+                        && (prevKeyword || prev == 0x7B || prev == 0x7D || prev == 0x3B || prev == 0x29 || prev == 0x2A)
+                        && memberMayFollow(nextSignificant(p, i, end)) && isClassMember(p, i, end) {
+                        out.add(st, i, .function)
+                        out.addSymbol(st, i, .function, titleStart: st)
+                        hint = 0; prev = p[i - 1]; prevKeyword = false
+                        continue
+                    }
+                    // Qualified names after a declaring keyword: `def self.create` (Ruby),
+                    // `function M.helper` / `function obj:method` (Lua), `fun String.isEmail`,
+                    // `fun <T> List<T>.second` (Kotlin), `sub My::Pkg::name` (Perl),
+                    // `defmodule App.User` (Elixir), `class Foo::Bar` (Ruby). Titles keep them.
+                    if hint & KeywordTable.Hint.declaresItself != 0 && i < end {
+                        let fn = hint == KeywordTable.Hint.declaresFunction
+                        var q = i
+                        if fn && p[q] == 0x3C { q = angleEnd(p, q, end) }
+                        let skip = p[q] == 0x2E ? 1 : p[q] == 0x3A ? (p[q + 1] == 0x3A ? 2 : fn ? 1 : 0) : 0
+                        if skip > 0 && q + skip < end && cc.isIdentStart(p[q + skip]) {
+                            if qualStart < 0 { qualStart = st }
+                            let qk = kw != 0 ? TokenKind(rawValue: kw & KeywordTable.Hint.kindMask) ?? .keyword
+                                : capTypes && c & ByteClass.upper != 0 ? TokenKind.type : .plain
+                            if qk != .plain { out.add(st, i, qk) }
+                            i = q + skip; prev = 0x2E; prevKeyword = false
+                            continue   // `hint` stays: the name follows
+                        }
+                    }
+                }
                 if kw != 0 {
                     kind = TokenKind(rawValue: kw & KeywordTable.Hint.kindMask) ?? .keyword
                     newHint = kw & ~KeywordTable.Hint.kindMask
@@ -123,27 +215,53 @@ public enum CLike {
                         if s.goReceivers && i < end && p[i] == 0x20 { receiverBase = parens; receiverAt = st }
                     }
                     if st > 0 && p[st - 1] == 0x3A { newHint = 0 }   // `Foo::class` refers to a class, doesn't declare one
-                    if newHint != 0 { hintAt = st }
+                    if s.lineStartLet && len == 3 && p[st] == 0x6C && p[st + 1] == 0x65 && p[st + 2] == 0x74
+                        && (st == start || p[st - 1] == newline) {
+                        newHint = KeywordTable.Hint.declaresFunction   // top-level `let f x =`
+                    }
+                    if s.sqlCreate {
+                        if len == 6 && p[st] | 0x20 == 0x63 && p[st + 1] | 0x20 == 0x72 && p[st + 5] | 0x20 == 0x65 { sawCreate = true }
+                        if newHint == KeywordTable.Hint.declaresType && !sawCreate { newHint = 0 }   // `ALTER TABLE t`
+                    }
+                    // `end program heat`, `end function` (Fortran, Pascal): closes, doesn't declare.
+                    if newHint != 0 && newHint != KeywordTable.Hint.declaresItself && afterEnd(p, start, st) { newHint = 0 }
+                    if newHint == KeywordTable.Hint.declaresItself {
+                        selfDeclaration(p, st, len, i, end, prev: prev, prevKeyword: prevKeyword, out)
+                        newHint = 0
+                    } else if jsDecl {
+                        if newHint == KeywordTable.Hint.declaresType && len == 5 && p[st] == 0x63 && p[st + 1] == 0x6C {
+                            pendingClass = true   // `class`: its body holds members
+                        } else if braces == 0 && newHint == 0 && isFunctionBinding(p, st, len, i, end) {
+                            newHint = KeywordTable.Hint.declaresFunction   // `const name = (...) =>`
+                        }
+                    }
+                    if keepHint { newHint = hint } else if newHint != 0 { hintAt = st }
                 } else if hint == KeywordTable.Hint.declaresFunction {
                     kind = .function
-                    out.addSymbol(st, i, .function, titleStart: hintAt)
+                    out.addSymbol(qualStart >= 0 ? qualStart : st, i, .function, titleStart: hintAt)
+                    qualStart = -1
                 } else if hint == KeywordTable.Hint.declaresType {
                     kind = .type
                     // C family: `struct stat st;` uses a type; only `struct foo {` defines one.
-                    if s.keywordlessDefinitionDepth < 0 || opensBody(p, i, end) {
-                        out.addSymbol(st, i, .type, titleStart: hintAt)
+                    if kwlDepth < 0 || opensBody(p, i, end) {
+                        out.addSymbol(qualStart >= 0 ? qualStart : st, i, .type, titleStart: hintAt)
                     }
-                } else if s.macroBang && i < end && p[i] == 0x21 && p[i + 1] != 0x3D {
+                    qualStart = -1
+                    sawCreate = false
+                } else if macroBang && i < end && p[i] == 0x21 && p[i + 1] != 0x3D {
                     i &+= 1
                     kind = .preprocessor
                 } else if nextSignificant(p, i, end) == 0x28 {
                     kind = .function
-                    if braces <= s.keywordlessDefinitionDepth && isDefinition(p, st, i, end) {
-                        out.addSymbol(st, i, .function, titleStart: st)
+                    // A definition's name follows a type, modifier or statement boundary, never
+                    // an operator, `(`, `,` or `.`: those calls skip the scan of their arguments.
+                    if braces <= kwlDepth && definitionMayFollow(prev) && isDefinition(p, st, i, end, arrows: arrows) {
+                        let qs = qualifiedStart(p, start, st)   // `~Foo`, `Matrix::multiply` (C++)
+                        out.addSymbol(qs, i, .function, titleStart: qs)
                     }
                 } else if prev == 0x2E && (st < 2 || p[st - 2] != 0x2E) {
                     kind = .property
-                } else if s.capitalizedTypes && c & ByteClass.upper != 0 {
+                } else if capTypes && c & ByteClass.upper != 0 {
                     kind = len > 1 && allCaps(p, st, i, cc) ? .constant : .type
                 }
                 if kind != .plain { out.add(st, i, kind) }
@@ -173,8 +291,20 @@ public enum CLike {
                 depth &-= 1
             }
             switch b {   // outline bookkeeping (strings and comments never get here)
-            case 0x7B: braces &+= 1
-            case 0x7D: braces = max(0, braces &- 1)
+            case 0x7B:
+                braces &+= 1
+                if pendingClass {
+                    pendingClass = false; classParens = parens
+                    if braces < 64 { classBodies |= 1 << UInt64(braces) }
+                }
+                if classBodies != 0 { inClassBody = braces < 64 && classBodies >> UInt64(braces) & 1 != 0 }
+            case 0x7D:
+                if classBodies != 0 {
+                    if braces < 64 { classBodies &= ~(1 << UInt64(braces)) }
+                    inClassBody = braces >= 1 && braces <= 64 && classBodies >> UInt64(braces - 1) & 1 != 0
+                }
+                braces = max(0, braces &- 1)
+            case 0x3B: pendingClass = false
             case 0x28: parens &+= 1
             case 0x29: parens = max(0, parens &- 1)
             default: break
@@ -253,9 +383,14 @@ public enum CLike {
                         j = lineEnd(p, i, end)
                     }
                     out.add(i, j, .comment); significant = false
+                } else if s.objcMethods && (i == start || p[i - 1] == newline) {
+                    objcMethod(p, i, end, out)
                 }
+            case 0x2B: // '+'
+                if s.objcMethods && (i == start || p[i - 1] == newline) { objcMethod(p, i, end, out) }
             case 0x3B: // ';'
                 if s.semicolonComment { j = lineEnd(p, i, end); out.add(i, j, .comment); significant = false }
+                sawCreate = false
             case 0x25: // '%'
                 if s.percentComment { j = lineEnd(p, i, end); out.add(i, j, .comment); significant = false }
             case 0x7B: // '{'
@@ -283,8 +418,17 @@ public enum CLike {
                 } else if (s.atAttribute || s.atKeywords) && cc.isIdentStart(p[i + 1]) {
                     j = i + 1
                     while j < end && cc.isIdent(p[j]) { j &+= 1 }
-                    if s.atKeywords && s.keywords.lookup(p + i + 1, j - i - 1) != 0 {
+                    let akw = s.atKeywords ? s.keywords.lookup(p + i + 1, j - i - 1) : 0
+                    if akw != 0 {
                         out.add(i, j, .keyword)
+                        // `@interface Name`, `@implementation Name`, `@protocol Name` (not `@protocol(`).
+                        if akw & KeywordTable.Hint.declaresItself == KeywordTable.Hint.declaresType && p[j] == 0x20 {
+                            var a = j
+                            while a < end && (p[a] == 0x20 || p[a] == 0x09) { a &+= 1 }
+                            var z = a
+                            while z < end && cc.isIdent(p[z]) { z &+= 1 }
+                            if z > a && nextSignificant(p, z, end) != 0x3B { out.addSymbol(a, z, .type, titleStart: i) }
+                        }
                     } else {
                         // Dotted decorators: @app.route, @pytest.mark.slow
                         while j + 1 < end && p[j] == 0x2E && cc.isIdentStart(p[j + 1]) {
@@ -325,13 +469,18 @@ public enum CLike {
                 if cc.isDigit(p[i + 1]) && !cc.isIdent(prev) && prev != 0x29 && prev != 0x2E {
                     j = number(p, i, end, cc); out.add(i, j, .number)
                 }
+            case 0x3C: // '<'
+                // `fun <T> name` (Kotlin): type parameters before the declared name.
+                if hint == KeywordTable.Hint.declaresFunction && prevKeyword { j = angleEnd(p, i, end) }
             default:
                 break
             }
             if significant {
                 prev = p[j - 1]
                 prevKeyword = false
-                hint = b == 0x3C || b == 0x2C ? hint : 0   // keep hint across generics `class Foo<`
+                // Keep the hint across generics (`class Foo<`) and OCaml's `type 'a t`.
+                if b != 0x3C && b != 0x2C && !(b == apos && hint == KeywordTable.Hint.declaresType) { hint = 0 }
+                if hint == 0 { qualStart = -1 }
                 if b == 0x29 && receiverBase >= 0 && parens <= receiverBase {
                     hint = KeywordTable.Hint.declaresFunction   // Go: `func (r *T)` -> the method name is next
                     hintAt = receiverAt
@@ -346,11 +495,15 @@ public enum CLike {
     // MARK: - Pieces
 
     /// `name(...)` at [st, i) is a definition when the matching `)` is followed (after
-    /// qualifiers like `const`, `override`, `throws X`) by `{`, and `name` isn't after `new`.
-    static func isDefinition(_ p: UnsafePointer<UInt8>, _ st: Int, _ i: Int, _ end: Int) -> Bool {
+    /// qualifiers like `const`, `override`, `throws X`) by `{` (or `=>` with `arrows`), and
+    /// `name` isn't after `new`.
+    static func isDefinition(_ p: UnsafePointer<UInt8>, _ st: Int, _ i: Int, _ end: Int, arrows: Bool = false) -> Bool {
         var b = st - 1
-        while b >= 0 && (p[b] == 0x20 || p[b] == 0x09) { b -= 1 }
+        if b >= 0 && p[b] == 0x7E { b -= 1 }   // ~Destructor(
+        while b >= 0 && (p[b] == 0x20 || p[b] == 0x09 || p[b] == 0x0A || p[b] == 0x0D) { b -= 1 }
         if b >= 2 && p[b] == 0x77 && p[b - 1] == 0x65 && p[b - 2] == 0x6E && (b < 3 || !isIdentByte(p[b - 3])) { return false }   // new X(
+        // Base-class calls and initializer lists: `: Base(x) {`, `: a(1), b(2) {`.
+        if b >= 0 && (p[b] == 0x2C || (p[b] == 0x3A && (b == 0 || p[b - 1] != 0x3A))) { return false }
         var k = i
         while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
         guard k < end, p[k] == 0x28 else { return false }
@@ -367,20 +520,351 @@ public enum CLike {
         while k < limit {
             let c = p[k]
             if c == 0x7B { return true }
+            // `=>` bodies: the name must follow a return type or modifier (`int f() =>`,
+            // `List<T> f() =>`), not start a switch arm (`Point(0, 0) => "origin"`).
+            if arrows && c == 0x3D && p[k + 1] == 0x3E {
+                var a = st - 1
+                while a >= 0 && (p[a] == 0x20 || p[a] == 0x09 || p[a] == 0x0A || p[a] == 0x0D) { a -= 1 }
+                return a >= 0 && (isIdentByte(p[a]) || p[a] == 0x3E || p[a] == 0x5D || p[a] == 0x3F || p[a] == 0x2A)
+            }
             if c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D || c == 0x2C || c == 0x2E || isIdentByte(c) { k += 1; continue }
+            // Constructor initializers: `) : a(x), b{y} {` (C++), `) : base(x) {` (C#).
+            if c == 0x3A && p[k + 1] != 0x3A { return initializerList(p, k + 1, limit) }
             return false
         }
         return false
     }
 
+    /// After a constructor's `:`: `name(...)` / `name{...}` items separated by commas, then
+    /// the body's `{`.
+    static func initializerList(_ p: UnsafePointer<UInt8>, _ i: Int, _ limit: Int) -> Bool {
+        var k = i
+        while true {
+            k = skipBlank(p, k, limit)
+            let s = k
+            while k < limit && (isIdentByte(p[k]) || p[k] == 0x3A || p[k] == 0x2E) { k += 1 }
+            if k == s { return false }
+            if p[k] == 0x3C { k = angleEnd(p, k, limit) }
+            let open = p[k], close: UInt8 = open == 0x28 ? 0x29 : 0x7D
+            guard open == 0x28 || open == 0x7B else { return false }
+            var depth = 0
+            while k < limit {
+                if p[k] == open { depth += 1 } else if p[k] == close { depth -= 1; if depth == 0 { break } }
+                else if p[k] == 0x3B { return false }
+                k += 1
+            }
+            guard k < limit else { return false }
+            k = skipBlank(p, k + 1, limit)
+            if p[k] == 0x7B { return true }
+            guard p[k] == 0x2C else { return false }
+            k += 1
+        }
+    }
+
+    /// What follows a class member's name: parameters, type parameters, `=` (arrow fields),
+    /// `?`/`!` (TS optional/definite members).
+    @inline(__always) static func memberMayFollow(_ b: UInt8) -> Bool {
+        b == 0x28 || b == 0x3C || b == 0x3D || b == 0x3F || b == 0x21
+    }
+
+    /// Bytes that can precede a keywordless definition's name: the end of a type or modifier
+    /// (`int f(`, `List<T> f(`, `int[] f(`, `char *f(`, `T& f(`, `int? f(`), `::`/`~` (C++),
+    /// or a statement boundary (`}` `;` `{`, a line start, `)` after an attribute).
+    @inline(__always) static func definitionMayFollow(_ prev: UInt8) -> Bool {
+        switch prev {
+        case 0x30...0x39, 0x41...0x5A, 0x61...0x7A, 0x5F, 0x80...0xFF,
+             0x3E, 0x5D, 0x3F, 0x2A, 0x26, 0x7D, 0x3B, 0x7B, 0x3A, 0x7E, 0x0A, 0x29:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// From a `<` at `i` to just past its matching `>` (`=>` and `->` inside don't close);
+    /// `i + 1` if it doesn't close on the line.
+    static func angleEnd(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int {
+        var depth = 0
+        var k = i
+        let limit = min(end, i + 256)
+        while k < limit {
+            switch p[k] {
+            case 0x3C: depth += 1
+            case 0x3E:
+                if p[k - 1] != 0x3D && p[k - 1] != 0x2D {
+                    depth -= 1
+                    if depth == 0 { return k + 1 }
+                }
+            case 0x0A, 0x3B, 0x7B, 0x7D: return i + 1
+            default: break
+            }
+            k += 1
+        }
+        return i + 1
+    }
+
+    /// From a `(` at `i` to just past its match, or nil (unbalanced within 4 KB).
+    static func parenEnd(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int? {
+        var depth = 0
+        var k = i
+        let limit = min(end, i + 4096)
+        while k < limit {
+            let c = p[k]
+            if c == 0x28 { depth += 1 } else if c == 0x29 { depth -= 1; if depth == 0 { return k + 1 } }
+            k += 1
+        }
+        return nil
+    }
+
+    @inline(__always) static func skipBlank(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int {
+        var k = i
+        while k < end && (p[k] == 0x20 || p[k] == 0x09 || p[k] == 0x0A || p[k] == 0x0D) { k += 1 }
+        return k
+    }
+
+    /// A keyword that is itself a declaration (`init`, `deinit`, `subscript`, `constructor`,
+    /// C++ `operator`, Rust `impl`, HCL blocks). Followed by parameters or a body: a function
+    /// named by the keyword. Otherwise (`impl Trait for Type {`, `resource "a" "b" {`) a
+    /// block whose header, up to `{`, is the title.
+    static func selfDeclaration(_ p: UnsafePointer<UInt8>, _ st: Int, _ len: Int, _ i: Int, _ end: Int,
+                                prev: UInt8, prevKeyword: Bool, _ out: TokenStream) {
+        var k = i
+        if len == 8 && p[st] == 0x6F && p[st + 1] == 0x70 {   // operator+(...) {, operator()(...) {
+            while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+            if (p[k] == 0x28 && p[k + 1] == 0x29) || (p[k] == 0x5B && p[k + 1] == 0x5D) {
+                k += 2
+            } else if isIdentByte(p[k]) {   // conversions and allocation: operator bool, operator new
+                while k < end && isIdentByte(p[k]) { k += 1 }
+                if p[k] == 0x5B && p[k + 1] == 0x5D { k += 2 }
+            } else {
+                while k < end, case let c = p[k], c != 0x28 && c != 0x20 && c != 0x0A && c != 0x3B && c != 0x7B && c != 0x29 { k += 1 }
+            }
+            if k > i && isDefinition(p, st, k, end) { out.addSymbol(st, k, .function, titleStart: st) }
+            return
+        }
+        if p[k] == 0x3F || p[k] == 0x21 { k += 1 }   // init? init!
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        if p[k] == 0x3C { k = angleEnd(p, k, end); while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 } }
+        if p[k] == 0x28 || p[k] == 0x7B {
+            out.addSymbol(st, i, .function, titleStart: st)
+            return
+        }
+        // Block header: only where a statement starts (`fn f() -> impl Trait` names a type),
+        // and not an assignment (`data = {` in HCL); `=` inside `<...>` is fine.
+        guard prevKeyword || prev == 0x0A || prev == 0x7D || prev == 0x3B || prev == 0x7B || prev == 0x5D else { return }
+        let limit = min(end, i + 512)
+        // Every HCL block comes here, so jump with SIMD to the first `{ ; = <` (a `<` means
+        // generics: the careful scan, where `=` may be inside `<...>` and lines may continue).
+        k = min(findAny(p, i, limit, 0x7B, 0x3B, 0x3D, 0x3C), limit)
+        if k < limit && p[k] == 0x3D { return }   // an assignment: `data = {`
+        if k < limit && p[k] == 0x3C {
+            var angles = 0
+            while k < limit {
+                let c = p[k]
+                if c == 0x7B || c == 0x3B || (c == 0x0A && angles <= 0) { break }
+                switch c {
+                case 0x3C: angles += 1
+                case 0x3E: if p[k - 1] != 0x2D && p[k - 1] != 0x3D { angles -= 1 }
+                case 0x3D: if angles <= 0 && p[k + 1] != 0x3E { return }
+                default: break
+                }
+                k += 1
+            }
+            // A header may continue on the next lines (`impl<T> Foo<T>\nwhere\n  T: X,\n{`).
+            if k < limit && p[k] == 0x0A {
+                while k < limit && p[k] != 0x7B && p[k] != 0x3B { k += 1 }
+            }
+        }
+        guard k < limit, p[k] == 0x7B else { return }
+        var e = k
+        if len == 4 && p[st] == 0x69 {   // Rust `impl`: a `where` clause stays out of the title
+            var w = i
+            while w + 5 < e {
+                if p[w] == 0x77 && p[w + 1] == 0x68 && p[w + 2] == 0x65 && p[w + 3] == 0x72 && p[w + 4] == 0x65
+                    && !isIdentByte(p[w - 1]) && !isIdentByte(p[w + 5]) { e = w; break }
+                w += 1
+            }
+        }
+        while e > i && (p[e - 1] == 0x20 || p[e - 1] == 0x09 || p[e - 1] == 0x0A || p[e - 1] == 0x0D) { e -= 1 }
+        out.addSymbol(st, e, .type, titleStart: st)
+    }
+
+    /// A column-0 name at `[.., i)` declares, per `rule`.
+    static func lineStartDeclares(_ rule: CLikeSpec.LineStart, _ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Bool {
+        var k = i
+        switch rule {
+        case .none: return false
+        case .clause: return p[k] == 0x28
+        case .label: return p[k] == 0x3A
+        case .signature:
+            while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+            return p[k] == 0x3A && (p[k + 1] == 0x3A || p[k + 1] == 0x20)
+        case .assignedFunction:
+            while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+            if p[k] == 0x3C && p[k + 1] == 0x2D { k += 2 }
+            else if p[k] == 0x3C && p[k + 1] == 0x3C && p[k + 2] == 0x2D { k += 3 }
+            else if p[k] == 0x3D && p[k + 1] != 0x3D { k += 1 }
+            else { return false }
+            while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+            if p[k] == 0x5C && p[k + 1] == 0x28 { return true }   // \(x) lambda
+            return p[k] == 0x66 && p[k + 1] == 0x75 && p[k + 2] == 0x6E && p[k + 3] == 0x63 && p[k + 4] == 0x74
+                && p[k + 5] == 0x69 && p[k + 6] == 0x6F && p[k + 7] == 0x6E && !isIdentByte(p[k + 8])
+        }
+    }
+
+    /// The word before `st` on the same line is `end` (any case): `end program x` closes.
+    static func afterEnd(_ p: UnsafePointer<UInt8>, _ start: Int, _ st: Int) -> Bool {
+        var a = st - 1
+        while a >= start && (p[a] == 0x20 || p[a] == 0x09) { a -= 1 }
+        guard a - 2 >= start, a < st - 1 else { return false }
+        return p[a] | 0x20 == 0x64 && p[a - 1] | 0x20 == 0x6E && p[a - 2] | 0x20 == 0x65
+            && (a - 3 < start || !isIdentByte(p[a - 3]))
+    }
+
+    /// Start of a definition's full name: `~Foo`, `Matrix::multiply`, `a::b::~c` (C++).
+    static func qualifiedStart(_ p: UnsafePointer<UInt8>, _ start: Int, _ st: Int) -> Int {
+        var a = st
+        if a > start && p[a - 1] == 0x7E { a -= 1 }
+        while a - 2 > start && p[a - 1] == 0x3A && p[a - 2] == 0x3A {
+            var y = a - 2
+            while y > start && isIdentByte(p[y - 1]) { y -= 1 }
+            if y == a - 2 { break }
+            a = y
+        }
+        return a
+    }
+
+    /// `- (type)name:(T)arg rest {` or `+ ...` at line start (Objective-C): the selector's first
+    /// part, with its colon. Only a definition (a `{` before any `;`).
+    static func objcMethod(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ out: TokenStream) {
+        var k = i + 1
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        if p[k] == 0x28, let close = parenEnd(p, k, end) { k = close }
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        let s = k
+        while k < end && (isIdentByte(p[k]) || p[k] >= 0x80) { k += 1 }
+        guard k > s else { return }
+        let e = p[k] == 0x3A ? k + 1 : k
+        var b = e
+        let limit = min(end, e + 2048)
+        while b < limit && p[b] != 0x7B && p[b] != 0x3B { b += 1 }
+        if b < limit && p[b] == 0x7B { out.addSymbol(s, e, .function, titleStart: s) }
+    }
+
+    /// JS/TS class member at `[.., i)`: `name(...) {`, `name<T>(...): R {`, or a field holding
+    /// an arrow function (`name = (...) =>`, `name = async x =>`).
+    static func isClassMember(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Bool {
+        var k = i
+        if p[k] == 0x3F || p[k] == 0x21 { k += 1 }   // name?( / name!: (TS)
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        if p[k] == 0x3C { k = angleEnd(p, k, end) }
+        if p[k] == 0x28 {
+            guard let close = parenEnd(p, k, end) else { return false }
+            k = skipBlank(p, close, end)
+            if p[k] == 0x7B { return true }
+            guard p[k] == 0x3A else { return false }
+            // A return type, then the body (`;` first: an overload or abstract signature).
+            let limit = min(end, k + 1024)
+            while k < limit {
+                switch p[k] {
+                case 0x7B: return true
+                case 0x3B, 0x7D: return false
+                case 0x3D: if p[k + 1] != 0x3E { return false }
+                default: break
+                }
+                k += 1
+            }
+            return false
+        }
+        guard let eq = assignment(p, k, end) else { return false }
+        return isFunctionValue(p, eq + 1, end)
+    }
+
+    /// `const|let|var name[: Type] = <function>`, the keyword at `st..<st+len`: the binding
+    /// declares a function.
+    static func isFunctionBinding(_ p: UnsafePointer<UInt8>, _ st: Int, _ len: Int, _ i: Int, _ end: Int) -> Bool {
+        let isBinding = (len == 5 && p[st] == 0x63 && p[st + 1] == 0x6F && p[st + 2] == 0x6E && p[st + 3] == 0x73 && p[st + 4] == 0x74)
+            || (len == 3 && ((p[st] == 0x6C && p[st + 1] == 0x65 && p[st + 2] == 0x74) || (p[st] == 0x76 && p[st + 1] == 0x61 && p[st + 2] == 0x72)))
+        guard isBinding else { return false }
+        var k = i
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        guard k < end, (isIdentByte(p[k]) && !(p[k] >= 0x30 && p[k] <= 0x39)) || p[k] == 0x24 else { return false }
+        while k < end && (isIdentByte(p[k]) || p[k] == 0x24 || p[k] >= 0x80) { k += 1 }
+        guard let eq = assignment(p, k, end) else { return false }
+        return isFunctionValue(p, eq + 1, end)
+    }
+
+    /// From just after a name: optional `!`/`?` and `: Type`, then `=` (not `==`/`=>`).
+    /// Returns the `=`'s index.
+    static func assignment(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int? {
+        var k = i
+        if p[k] == 0x21 || p[k] == 0x3F { k += 1 }
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        if p[k] == 0x3D { return p[k + 1] == 0x3D || p[k + 1] == 0x3E ? nil : k }
+        guard p[k] == 0x3A else { return nil }
+        var depth = 0   // brackets inside the type annotation
+        let limit = min(end, k + 512)
+        k += 1
+        while k < limit {
+            switch p[k] {
+            case 0x28, 0x3C, 0x5B, 0x7B: depth += 1
+            case 0x29, 0x5D, 0x7D: depth -= 1; if depth < 0 { return nil }
+            case 0x3E: if p[k - 1] != 0x3D { depth -= 1; if depth < 0 { return nil } }
+            case 0x3D:
+                if p[k + 1] == 0x3E { k += 1 }
+                else if depth == 0 { return p[k + 1] == 0x3D ? nil : k }
+            case 0x3B, 0x0A: if depth == 0 { return nil }
+            default: break
+            }
+            k += 1
+        }
+        return nil
+    }
+
+    /// A function expression starts at `i`: `function`, `(...) =>`, `x =>`, `<T>(...) =>`,
+    /// each optionally `async`.
+    static func isFunctionValue(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Bool {
+        var k = i
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        if p[k] == 0x61 && p[k + 1] == 0x73 && p[k + 2] == 0x79 && p[k + 3] == 0x6E && p[k + 4] == 0x63 && !isIdentByte(p[k + 5]) {
+            k += 5
+            while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        }
+        if p[k] == 0x66 && p[k + 1] == 0x75 && p[k + 2] == 0x6E && p[k + 3] == 0x63 && p[k + 4] == 0x74
+            && p[k + 5] == 0x69 && p[k + 6] == 0x6F && p[k + 7] == 0x6E && !isIdentByte(p[k + 8]) { return true }
+        if p[k] == 0x3C { k = angleEnd(p, k, end) }
+        if p[k] == 0x28 {
+            guard let close = parenEnd(p, k, end) else { return false }
+            k = close
+            while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+            if p[k] == 0x3A {   // a return type, then `=>`
+                let limit = min(end, k + 256)
+                while k < limit && p[k] != 0x0A && p[k] != 0x3B && !(p[k] == 0x3D && p[k + 1] == 0x3E) { k += 1 }
+            }
+            return p[k] == 0x3D && p[k + 1] == 0x3E
+        }
+        guard isIdentByte(p[k]) && !(p[k] >= 0x30 && p[k] <= 0x39) else { return false }
+        while k < end && (isIdentByte(p[k]) || p[k] == 0x24) { k += 1 }
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        return p[k] == 0x3D && p[k + 1] == 0x3E
+    }
+
     /// A `{` comes before any `;`, `=`, `(` or `)` (within 512 bytes): the type has a body.
     static func opensBody(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Bool {
         var k = i
-        let limit = min(end, i + 512)
+        while k < end && (p[k] == 0x20 || p[k] == 0x09) { k += 1 }
+        if p[k] == 0x3C { k = angleEnd(p, k, end) }
+        // Records and primary constructors: `record Point(int X, int Y) {` (C#, Java).
+        if p[k] == 0x28, let close = parenEnd(p, k, end) { k = close }
+        let limit = min(end, k + 512)
+        var bases = false   // after `:`, base calls may take arguments: `: Shape("circle") {`
         while k < limit {
             switch p[k] {
             case 0x7B: return true
-            case 0x3B, 0x3D, 0x28, 0x29: return false
+            case 0x3A: bases = true; k += 1
+            case 0x28:
+                guard bases, let close = parenEnd(p, k, end) else { return false }
+                k = close
+            case 0x3B, 0x3D, 0x29: return false
             default: k += 1
             }
         }

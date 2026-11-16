@@ -607,15 +607,17 @@ func jumpBench(_ args: [String]) {
     }
 }
 
-/// The code outline for files: `peep-dev symbols a.swift b.go`.
+/// The code outline for files: `peep-dev symbols a.swift b.go` (first 60 entries per file;
+/// `--all` for every entry).
 @MainActor
 func symbolsDump(_ args: [String]) {
-    for f in args {
+    let all = args.contains("--all")
+    for f in args where f != "--all" {
         let d = Document.open(path: f)
         guard let c = d.content as? CodeContent, let t = c.tokens else { print("\(f): not code"); continue }
         let syms = CodeOutline.symbols(c.text, c.lines, t)
         print("== \((f as NSString).lastPathComponent) (\(c.language.name)): \(syms.count) symbols")
-        for s in syms.prefix(60) { print(String(repeating: "  ", count: s.level) + s.title + "  :\(s.line + 1)") }
+        for s in syms.prefix(all ? syms.count : 60) { print(String(repeating: "  ", count: s.level) + s.title + "  :\(s.line + 1)") }
     }
 }
 
