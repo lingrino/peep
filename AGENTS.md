@@ -30,8 +30,8 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 1. **PeepPreview.appex** — `Sources/Preview/`. One `PreviewViewController` per visible preview
    (Finder's column preview pane and the Space panel each get one); the process is long-lived
    and reused. `preparePreviewOfFile` runs on the main thread: load → decode → detect → lex/parse
-   → show, then calls the handler. Logs `prepare <file>: <stage timings>` (subsystem
-   `com.lingrino.peep`).
+   → show → draw the first tiles, then calls the handler. Logs `prepare <file>: <stage
+   timings>` (subsystem `com.lingrino.peep`), and once per process its cold-start time.
 2. **Keyboard agent** — `Sources/App/Agent.swift`. Quick Look previews *never* receive key
    events (the panel never becomes key; typing goes to Finder). The agent installs a session
    event tap (needs the Accessibility grant) and forwards keys over XPC **only** when a Peep
@@ -51,10 +51,10 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 | `Sources/Core/Text/` | `TextBuffer` (padded bytes), `FileLoader`, `Decoder` (encodings/binary), `LineIndex` (SIMD), `Search` (SIMD), `SIMD.swift` helpers, `HexDump` |
 | `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, markdown source), `Language` (detection table + dispatch) |
 | `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset), `MarkdownParser` (assembly), `MarkdownModel` (flat output), `Entities` |
-| `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition + key handling), `Theme`, `Document` (file → content pipeline) |
-| `Sources/Preview/` | Extension principal class + `AgentClient` |
+| `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline), `Prewarm` (launch-time warm-up) |
+| `Sources/Preview/` | `main.swift` (starts `Prewarm`, then `NSExtensionMain`), principal class `PreviewViewController`, `AgentClient` |
 | `Sources/App/` | Host app, agent |
-| `Dev/` | `peep-dev` tool: `render`, `bench`, `lexbench`, `tokens`, `layout`, `types` |
+| `Dev/` | `peep-dev` tool: `render`, `bench`, `lexbench`, `parsebench`, `mdbench`, `firstpaint`, `findbench`, `smoke`, `tokens`, `layout`, `types`, `icon` |
 | `Tests/` | Zero-dependency test harness + tests (text, search, lexers, markdown) |
 | `Bundle/` | Info.plists, entitlements |
 | `Scripts/` | build/test/dev/profile/signing/type generation |
