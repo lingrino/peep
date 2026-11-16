@@ -1,0 +1,5 @@
+{
+  "name": "example-app",
+  "version": "2.4.0",
+  "scripts": { "start": "node server.js" }
+}

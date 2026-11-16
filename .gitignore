@@ -3,3 +3,6 @@
 *.xcodeproj
 .DS_Store
 Examples/Large/
+# Sample archives and backups are content here (global ignores often exclude these types).
+!Examples/Archives/*
+!Examples/Wrappers/*.bak
