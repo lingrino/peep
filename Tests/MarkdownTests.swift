@@ -172,6 +172,10 @@ let markdownTests: [Test] = [
         expectMD("---\ntitle: x\n---\n# Doc\n\n---\n\nText[^1]\n\n[^1]: Note", [
             "H1|Doc", "HR|", "P|Text^1^", "P|^1^ Note",
         ])
+        // Definitions on consecutive lines each start a line; "[^x]" mid-line stays a reference.
+        expectMD("A[^1] B[^b]\n\n[^1]: One\n[^b]: Two [^1]: three\n  [^c] four", [
+            "P|A^1^ B^2^", "P|^1^ One⏎^2^ Two ^1^: three ^3^ four",
+        ])
     },
     Test("md: consecutive reference definitions") {
         // Several definitions in one paragraph, then a definition followed by text, then a

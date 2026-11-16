@@ -241,6 +241,7 @@ final class InlineParser {
         let set = specialSet
         var i = 0
         var textStart = 0
+        var lineStart = 0   // first non-space byte of the current line
         @inline(__always) func flush(_ upto: Int) {
             if upto > textStart { text(textStart, upto) }
         }
@@ -293,10 +294,14 @@ final class InlineParser {
                 var spaces = 0
                 while e > textStart && p[e - 1] == 0x20 { e -= 1; spaces += 1 }
                 flush(e)
-                add(spaces >= 2 ? InlineParser.kHard : InlineParser.kSoft)
                 i += 1
                 while i < n && (p[i] == 0x20 || p[i] == 0x09) { i += 1 }
+                // Footnote definitions are usually written one per line with no blank line
+                // between them (a lazy continuation here): each starts its own line.
+                let footnote = i + 1 < n && p[i] == 0x5B && p[i + 1] == 0x5E && InlineParser.isFootnoteDefinition(p, i, n)
+                add(spaces >= 2 || footnote ? InlineParser.kHard : InlineParser.kSoft)
                 textStart = i
+                lineStart = i
             case 0x60: // code span
                 var k = i
                 while k < n && p[k] == 0x60 { k += 1 }
@@ -342,7 +347,7 @@ final class InlineParser {
                 // Footnote reference [^label] (and definition "[^label]:" at block start).
                 if i + 1 < n && p[i + 1] == 0x5E, let close = InlineParser.findByte(p, i + 2, n, 0x5D), close > i + 2 {
                     let label = String(decoding: UnsafeBufferPointer(start: p + i + 2, count: close - i - 2), as: UTF8.self)
-                    let isDef = close + 1 < n && p[close + 1] == 0x3A && i == 0
+                    let isDef = close + 1 < n && p[close + 1] == 0x3A && i == lineStart
                     let num: Int
                     if let v = footnotes[label] { num = v } else { num = footnotes.count + 1; footnotes[label] = num }
                     let fs = Int32(MDStyle.superscript.rawValue | MDStyle.footnoteRef.rawValue)
@@ -770,6 +775,12 @@ final class InlineParser {
             for k in 0..<oldCap where old[k].hash != 0 { insertRef(old[k]) }
             old.deallocate()
         }
+    }
+
+    /// `[^label]:` at `i` (which is at a `[^`), within one line.
+    static func isFootnoteDefinition(_ p: UnsafePointer<UInt8>, _ i: Int, _ n: Int) -> Bool {
+        guard let close = findByte(p, i + 2, n, 0x5D), close > i + 2 else { return false }
+        return close + 1 < n && p[close + 1] == 0x3A
     }
 
     /// `[label]: dest "title"` at the start of `p[0..<n]`: bytes consumed (through the line
