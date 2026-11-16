@@ -82,7 +82,8 @@ final class ImageStore {
         guard i < slots.count else { return (1, 1) }
         let spec = specs[i]
         let slot = slots[i]
-        var w = CGFloat(spec.width), h = CGFloat(spec.height)
+        var w = CGFloat(spec.width), h = CGFloat(max(0, spec.height))
+        if w < 0 { w = (maxWidth * -w / 100).rounded() }   // width="50%"
         let nat = slot.size
         switch slot.state {
         case .failed: return w > 0 && h > 0 ? (w, h) : (0.01, 0.01)

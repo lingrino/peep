@@ -39,13 +39,13 @@ public enum MarkdownParser {
                 gather(pb)
                 // Trailing whitespace of the last line is never significant.
                 while let l = scratch.last, l == 0x20 || l == 0x09 { scratch.removeLast() }
-                ctx.blockAlign = .left
+                ctx.blockAlign = ctx.alignStack.last ?? .left
                 ctx.blockHeading = 0
                 scratch.withUnsafeBufferPointer { InlineParser.parse($0.baseAddress ?? p, $0.count, ctx) }
                 b.align = ctx.blockAlign
             case .html:
                 gather(pb)
-                ctx.blockAlign = .left
+                ctx.blockAlign = ctx.alignStack.last ?? .left
                 ctx.blockHeading = 0
                 ctx.sawRule = false
                 scratch.withUnsafeBufferPointer { InlineParser.parse($0.baseAddress ?? p, $0.count, ctx) }

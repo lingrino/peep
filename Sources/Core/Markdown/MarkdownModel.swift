@@ -81,8 +81,8 @@ public struct MDRun: Sendable {
 public struct MDImage: Sendable {
     public var url: String
     public var alt: String
-    public var width: Float = 0      // from HTML attributes, 0 = intrinsic
-    public var height: Float = 0
+    public var width: Float = 0      // from HTML attributes, 0 = intrinsic, < 0 = percent of content width
+    public var height: Float = 0     // 0 = intrinsic (percent heights are ignored)
     public var darkURL: String?      // <picture> source for dark appearance
 }
 

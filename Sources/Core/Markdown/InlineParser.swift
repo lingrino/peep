@@ -25,6 +25,10 @@ final class InlineContext {
     var footnotes: [String: Int] = [:]
     /// Block-level hints discovered while parsing HTML (align, heading level).
     var blockAlign: MDAlign = .left
+    /// Alignment of open `<div>`/`<center>` elements. They often span several Markdown blocks
+    /// (README headers: `<div align="center">`, blank line, links paragraph, `</div>`); the
+    /// blocks in between inherit the innermost alignment, as in a browser.
+    var alignStack: [MDAlign] = []
     var blockHeading: UInt8 = 0
     var sawRule = false
     /// `<picture><source media=dark srcset=...>` seen; applies to the next <img>.
@@ -762,6 +766,10 @@ enum InlineParser {
                 let align = attrs()["align"]?.lowercased()
                 if name == Tag.center || align == "center" { ctx.blockAlign = .center }
                 else if align == "right" { ctx.blockAlign = .right }
+                else if align == "left" { ctx.blockAlign = .left }
+                if name != Tag.p { ctx.alignStack.append(align == nil && name != Tag.center ? (ctx.alignStack.last ?? .left) : ctx.blockAlign) }
+            } else if name != Tag.p, !ctx.alignStack.isEmpty {
+                ctx.alignStack.removeLast()
             }
             if st.tail >= 0 { st.add(Node(kind: kHard)) }
         case _ where k - ns == 2 && p[ns] | 0x20 == 0x68 && p[ns + 1] >= 0x31 && p[ns + 1] <= 0x36:   // h1-h6
@@ -787,9 +795,12 @@ enum InlineParser {
         }
     }
 
+    /// HTML length attribute: "120" or "120px" -> 120; "50%" -> -50 (percent of the content
+    /// width, resolved at layout).
     static func number(_ s: String?) -> Float {
         guard let s else { return 0 }
-        return Float(s.filter { $0.isNumber || $0 == "." }) ?? 0
+        let v = Float(s.filter { $0.isNumber || $0 == "." }) ?? 0
+        return s.hasSuffix("%") ? -min(v, 100) : v
     }
 
     static func parseAttributes(_ p: UnsafePointer<UInt8>, _ s: Int, _ e: Int) -> [String: String] {

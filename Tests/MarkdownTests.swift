@@ -130,6 +130,13 @@ let markdownTests: [Test] = [
             "P^|![Logo](logo.png)", "P|Press <kbd>⌘</kbd>+**F**⏎next",
         ])
     },
+    Test("md: aligned div spans blocks") {
+        expectMD("<div align=\"center\">\n  <img src=\"logo.png\" alt=\"L\">\n\n[a](x) | b\n</div>\n\nafter", [
+            "P^|![L](logo.png)", "P^|[a](x) | b", "P|after",
+        ])
+        expectMD("<center>\n\n# Title\n\n</center>\n\ntext", ["H1^|Title", "P|text"])
+        expectMD("<div>\n\nplain\n\n</div>", ["P|plain"])
+    },
     Test("md: html tag names match exactly") {
         expectMD("<STRONG>a</STRONG> <a2>b</a2> <h7>c</h7> <Kbd>k</Kbd> <code>x</code>", [
             "P|**a** b c <kbd>k</kbd> `x`",
