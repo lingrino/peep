@@ -182,7 +182,12 @@ final class AgentCore {
             return Unmanaged.passUnretained(event)
         }
         if previews.isEmpty || type != .keyDown { return Unmanaged.passUnretained(event) }
-        guard let target = target(), shouldIntercept(event, target) else { return Unmanaged.passUnretained(event) }
+        let t = target()
+        if event.flags.contains(.maskCommand) {
+            // Debug aid (no characters are ever logged): why a ⌘-key was or wasn't taken.
+            Agent.log.debug("cmd key \(event.getIntegerValueField(.keyboardEventKeycode)) panel=\(String(describing: self.panelCache.rect), privacy: .public) previews=\(self.previews.map { "\($0.id):\(Int($0.size.width))x\(Int($0.size.height))\($0.visible ? "" : "(hidden)")" }.joined(separator: ","), privacy: .public) target=\(t.map { String($0.id) } ?? "none", privacy: .public)")
+        }
+        guard let target = t, shouldIntercept(event, target) else { return Unmanaged.passUnretained(event) }
         send(event, to: target)
         return nil
     }

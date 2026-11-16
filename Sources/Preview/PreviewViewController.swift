@@ -53,8 +53,16 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         let t0 = nanotime()
         let doc = Document.open(path: url.path)
+        let preferred = preferredSize(for: doc)
+        preferredContentSize = preferred
+        // Lay out at the size Quick Look is about to give the panel, not the transient one it
+        // has now (avoids a second markdown layout). Finder's small column-view preview pane
+        // keeps its own size.
+        if view.bounds.width >= 400 && view.bounds.size != preferred {
+            view.setFrameSize(preferred)
+            view.layoutSubtreeIfNeeded()
+        }
         preview.show(doc)
-        preferredContentSize = preferredSize(for: doc)
         handler(nil)
         let ms = Double(nanotime() - t0) / 1e6
         log.notice("prepare \(url.lastPathComponent, privacy: .public): \(doc.timingSummary, privacy: .public) | total \(ms, format: .fixed(precision: 2))ms")

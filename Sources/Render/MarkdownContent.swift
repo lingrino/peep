@@ -1,5 +1,8 @@
 import AppKit
 import CoreText
+import os
+
+let renderLog = Logger(subsystem: "com.lingrino.peep", category: "render")
 
 /// Rendered markdown: blocks laid out top to bottom with Core Text (TextBox per paragraph,
 /// heading, code block and table cell) plus drawn decorations (rules, quote bars, list
@@ -86,11 +89,13 @@ public final class MarkdownContent: DocumentContent {
             pending = nil
             stack(results, x0: x0)
             lastLayoutNanos = nanotime() - t0
+            renderLog.debug("md layout w=\(self.width) all \(n) blocks \(Double(self.lastLayoutNanos) / 1e6)ms")
             return
         }
         for i in k..<n { results.append(MarkdownLayout.estimate(i, env)) }
         stack(results, x0: x0)
         lastLayoutNanos = nanotime() - t0
+        renderLog.debug("md layout w=\(self.width) sync \(k)/\(n) blocks \(Double(self.lastLayoutNanos) / 1e6)ms")
 
         // Background: everything after the prefix, in parallel.
         let job = PendingLayout(first: k, count: n - k, x0: x0, prefix: results[0..<k])

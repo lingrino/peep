@@ -80,7 +80,7 @@ public enum MarkdownParser {
                 var slug = slugify(title)
                 if let n = slugs[slug] { slugs[slug] = n + 1; slug += "-\(n + 1)" } else { slugs[slug] = 0 }
                 b.heading = Int32(headings.count)
-                headings.append(MDHeading(level: Int(b.level), title: String(title.filter { $0 != "\u{FFFC}" }),
+                headings.append(MDHeading(level: Int(b.level), title: headingTitle(title, b, ctx),
                                           slug: slug, block: blocks.count))
             }
             ctx.text.append(0x0A)   // block separator
@@ -98,6 +98,16 @@ public enum MarkdownParser {
 
     /// "Tight" = no paragraph gap before this block: inside a tight list, except the first
     /// block of a list that doesn't itself sit in a tight list.
+    /// Heading text for the outline: images contribute their alt text.
+    static func headingTitle(_ title: String, _ b: MDBlock, _ ctx: InlineContext) -> String {
+        if !title.contains("\u{FFFC}") { return title }
+        var alts = ctx.runs[Int(b.runStart)..<ctx.runs.count].filter { $0.style.contains(.image) && $0.start < b.textEnd }
+            .map { ctx.images[Int($0.ref)].alt }.makeIterator()
+        var out = ""
+        for ch in title { if ch == "\u{FFFC}" { out += alts.next() ?? "" } else { out.append(ch) } }
+        return out.trimmingSpaces()
+    }
+
     static func isTight(_ bp: BlockParser, _ pb: PendingBlock, _ bi: Int) -> Bool {
         guard pb.list >= 0 else { return false }
         let l = bp.lists[Int(pb.list)]
@@ -165,5 +175,14 @@ public enum MarkdownParser {
             else if ch == " " { out.append("-") }
         }
         return out
+    }
+}
+
+extension String {
+    func trimmingSpaces() -> String {
+        var s = Substring(self)
+        while let f = s.first, f == " " || f == "\n" { s = s.dropFirst() }
+        while let l = s.last, l == " " || l == "\n" { s = s.dropLast() }
+        return String(s)
     }
 }
