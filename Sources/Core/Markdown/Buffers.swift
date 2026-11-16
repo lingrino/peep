@@ -1,4 +1,5 @@
 import Darwin
+import _Builtin_intrinsics.arm.neon
 
 // Raw growable buffers for the markdown parser's hot loops.
 //
@@ -218,4 +219,42 @@ struct StrRange: BitwiseCopyable {
     var end: Int32
     static let none = StrRange(start: -1, end: -1)
     @inline(__always) var isNone: Bool { start < 0 }
+}
+
+/// Appends the offset of every `\n` in `p[start..<n]` to `out`. 64 bytes per step into one
+/// newline bitmask, then "flatten" (as in LineIndex): four offsets written unconditionally,
+/// advance by popcount, so the common 0-4 newlines per step take no data-dependent branch. (A
+/// search per line mispredicted its exit on most lines: ~15% of parsing the CommonMark spec.)
+/// `p` must be a TextBuffer: its zero padding covers the reads past `n` and holds no newline.
+func newlineOffsets(_ p: UnsafePointer<UInt8>, _ start: Int, _ n: Int, into out: inout RawArray<UInt32>) {
+    var i = start
+    let nl = splat(0x0A)
+    let weights = V16(1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128)
+    while i < n {
+        if out.count &+ 64 > out.cap { out.grow(out.count &+ 64) }
+        let a = unsafeBitCast(load16(p + i) .== nl, to: V16.self) & weights
+        let b = unsafeBitCast(load16(p + i + 16) .== nl, to: V16.self) & weights
+        let d = unsafeBitCast(load16(p + i + 32) .== nl, to: V16.self) & weights
+        let e = unsafeBitCast(load16(p + i + 48) .== nl, to: V16.self) & weights
+        let r = vpaddq_u8(vpaddq_u8(a, b), vpaddq_u8(d, e))
+        var m = unsafeBitCast(vpaddq_u8(r, r), to: SIMD2<UInt64>.self)[0]
+        if m != 0 {
+            let k = m.nonzeroBitCount
+            let base = UInt32(truncatingIfNeeded: i)
+            let s = out.p + out.count
+            s[0] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+            s[1] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+            s[2] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+            s[3] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+            var w = 4
+            while m != 0 {
+                s[w] = base &+ UInt32(m.trailingZeroBitCount)
+                m &= m &- 1
+                w &+= 1
+            }
+            out.count &+= k
+        }
+        i &+= 64
+    }
+    while out.count > 0 && Int(out.last) >= n { out.count -= 1 }
 }

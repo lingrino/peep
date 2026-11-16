@@ -103,11 +103,12 @@ public enum Language: UInt8, CaseIterable, Sendable {
         guard n > 0, n <= 16 else {
             return n > 16 ? named(String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)) : nil
         }
-        return packedNameMap[NameKey(p, n)]
+        return packedNameMap.find(NameKey(p, n))
     }
 
-    struct NameKey: Hashable {
+    struct NameKey: Hashable, BitwiseCopyable {
         var a: UInt64 = 0, b: UInt64 = 0
+        init() {}
         init(_ p: UnsafePointer<UInt8>, _ n: Int) {
             for k in 0..<n {
                 var c = UInt64(p[k])
@@ -117,14 +118,56 @@ public enum Language: UInt8, CaseIterable, Sendable {
         }
     }
 
-    static let packedNameMap: [NameKey: Language] = {
-        var m: [NameKey: Language] = [:]
+    static let packedNameMap: PackedNameTable = {
+        var entries: [(NameKey, Language)] = []
         for (name, l) in nameMap {
             let u = Array(name.utf8)
-            if u.count <= 16 { u.withUnsafeBufferPointer { m[NameKey($0.baseAddress!, u.count)] = l } }
+            if u.count <= 16 { u.withUnsafeBufferPointer { entries.append((NameKey($0.baseAddress!, u.count), l)) } }
         }
-        return m
+        return PackedNameTable(entries)
     }()
+
+    /// Open addressing over packed names with a multiply-shift hash: Dictionary's SipHash
+    /// was most of a fence lookup (one per code block; most miss, like the CommonMark spec's
+    /// 700 "example" fences).
+    struct PackedNameTable: @unchecked Sendable {
+        let keys: UnsafeMutablePointer<NameKey>     // (0, 0) = empty slot
+        let values: UnsafeMutablePointer<Language>
+        let shift: UInt64
+        let mask: Int
+
+        init(_ entries: [(NameKey, Language)]) {
+            var bits: UInt64 = 4
+            while (1 << bits) < entries.count * 4 { bits += 1 }   // load <= 1/4: short probes
+            let cap = 1 << Int(bits)
+            shift = 64 - bits
+            mask = cap - 1
+            keys = .allocate(capacity: cap)
+            keys.initialize(repeating: NameKey(), count: cap)
+            values = .allocate(capacity: cap)
+            values.initialize(repeating: .plain, count: cap)
+            for (k, v) in entries {
+                var i = slot(k)
+                while keys[i] != NameKey() && keys[i] != k { i = (i + 1) & mask }
+                keys[i] = k
+                values[i] = v
+            }
+        }
+
+        @inline(__always) func slot(_ k: NameKey) -> Int {
+            Int(truncatingIfNeeded: (k.a &* 0x9E37_79B9_7F4A_7C15 ^ k.b &* 0xC2B2_AE3D_27D4_EB4F) >> shift)
+        }
+
+        @inline(__always) func find(_ k: NameKey) -> Language? {
+            var i = slot(k)
+            while true {
+                let s = keys[i]
+                if s == k { return s == NameKey() ? nil : values[i] }
+                if s == NameKey() { return nil }
+                i = (i + 1) & mask
+            }
+        }
+    }
 
     /// Lowercased language names, common aliases, and every file extension.
     static let nameMap: [String: Language] = {

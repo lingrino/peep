@@ -90,8 +90,14 @@ final class BlockParser {
 
     func run() {
         var i = skipFrontMatter()
+        var newlines = RawArray<UInt32>(capacity: n / 24 + 64)
+        defer { newlines.free() }
+        newlineOffsets(p, i, n, into: &newlines)
+        let nlp = newlines.p, nlc = newlines.count
+        var k = 0
         while i < n {
-            let le = lineEnd(p, i, n)
+            let le = k < nlc ? Int(nlp[k]) : n
+            k &+= 1
             var ce = le
             if ce > i && p[ce - 1] == 0x0D { ce -= 1 }
             processLine(i, ce)
@@ -166,6 +172,11 @@ final class BlockParser {
             if leaf == .fenced {
                 if ind <= 3 && isClosingFence(at, le) {
                     closeLeaf()
+                } else if fenceIndent == 0 && leafLineCount > 0 && Int(lines.last) &+ 1 == ls {
+                    // Contiguous with the previous content line (separated by just "\n"):
+                    // extend it. Code is emitted as its lines joined by "\n", so one range
+                    // spanning several lines renders the same, with one copy.
+                    lines.last = Int32(truncatingIfNeeded: le)
                 } else {
                     let (sp, _) = consumeColumns(ls, le, col: 0, count: fenceIndent)
                     addLine(sp, le)
@@ -411,8 +422,7 @@ final class BlockParser {
                 closeLeaf()
                 startLeaf(.fenced)
                 fenceChar = b
-                var k = at
-                while k < le && p[k] == fenceChar { k += 1 }
+                let k = runEnd(at, le, b)
                 fenceLen = k - at
                 fenceIndent = ind
                 var s = k
@@ -674,20 +684,31 @@ final class BlockParser {
         return k == le ? (c == 0x3D ? 1 : 2) : nil
     }
 
+    /// End of the run of byte `c` starting at `at` (16 bytes per step: the CommonMark spec
+    /// fences its examples with 32 backticks).
+    @inline(__always) func runEnd(_ at: Int, _ le: Int, _ c: UInt8) -> Int {
+        var k = at
+        let v = splat(c)
+        while k < le {
+            let m = nibbles(load16(p + k) .!= v)
+            if m != 0 { return min(k + (m.trailingZeroBitCount >> 2), le) }
+            k &+= 16
+        }
+        return le
+    }
+
     func isOpeningFence(_ at: Int, _ le: Int) -> Bool {
         let c = p[at]
         guard c == 0x60 || c == 0x7E else { return false }
-        var k = at
-        while k < le && p[k] == c { k += 1 }
+        let k = runEnd(at, le, c)
         if k - at < 3 { return false }
-        if c == 0x60 { for j in k..<le where p[j] == 0x60 { return false } }
+        if c == 0x60 && findAny(p, k, le, 0x60, 0x60, 0x60, 0x60) < le { return false }
         return true
     }
 
     func isClosingFence(_ at: Int, _ le: Int) -> Bool {
         guard at < le, p[at] == fenceChar else { return false }
-        var k = at
-        while k < le && p[k] == fenceChar { k += 1 }
+        let k = runEnd(at, le, fenceChar)
         if k - at < fenceLen { return false }
         return isBlank(k, le)
     }
