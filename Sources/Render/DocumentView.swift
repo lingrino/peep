@@ -32,6 +32,8 @@ public protocol DocumentContent: AnyObject {
     func setPalette(_ p: Palette) -> Bool
     /// Y of a named anchor (markdown heading slug), for in-document links.
     func anchorY(_ name: String) -> CGFloat?
+    /// About to show `rect` (content space): finish any deferred layout it needs.
+    func willShow(_ rect: CGRect)
 }
 
 extension DocumentContent {
@@ -40,6 +42,7 @@ extension DocumentContent {
     public func link(at point: CGPoint) -> String? { nil }
     public func setPalette(_ p: Palette) -> Bool { false }
     public func anchorY(_ name: String) -> CGFloat? { nil }
+    public func willShow(_ rect: CGRect) {}
 }
 
 /// Selection and find state handed to the content's draw call.
@@ -187,6 +190,7 @@ public final class DocumentView: NSView {
         let margin = ts / 2
         let want = vis.insetBy(dx: -margin, dy: -margin).intersection(bounds)
         if want.isNull || want.isEmpty { return }
+        c.willShow(want.offsetBy(dx: -c.gutterWidth, dy: 0))
         let c0 = Int(want.minX / ts), c1 = Int((want.maxX - 0.5) / ts)
         let r0 = Int(want.minY / ts), r1 = Int((want.maxY - 0.5) / ts)
         let gw = c.gutterWidth

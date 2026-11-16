@@ -12,16 +12,15 @@ enum MDAttr {
 
 /// One laid-out run of rich text (a paragraph, heading, code block or table cell): a CTFrame
 /// placed in content space plus the mapping back to the document's UTF-8 text range.
-@MainActor
-final class TextBox {
-    let rect: CGRect                 // content space (y down)
+final class TextBox: @unchecked Sendable {
+    private(set) var rect: CGRect    // content space (y down); built in local space, then translated
     let start: Int                   // UTF-8 range in the document text
     let end: Int
     let lines: [CTLine]
-    let baselines: [CGFloat]         // content-space y of each baseline
-    let lineX: [CGFloat]             // content-space x of each line origin
-    let lineTop: [CGFloat]
-    let lineBottom: [CGFloat]
+    private(set) var baselines: [CGFloat]   // content-space y of each baseline
+    let lineX: [CGFloat]                    // content-space x of each line origin
+    private(set) var lineTop: [CGFloat]
+    private(set) var lineBottom: [CGFloat]
     /// UTF-16 offset for each UTF-8 byte of the range (nil when the range is ASCII).
     let utf16: [Int32]?
     let utf16Count: Int
@@ -32,9 +31,9 @@ final class TextBox {
         self.end = end
         let setter = CTFramesetterCreateWithAttributedString(attributed)
         let len = attributed.length
-        let constraint = CGSize(width: max(1, width), height: .greatestFiniteMagnitude)
-        let fit = CTFramesetterSuggestFrameSizeWithConstraints(setter, CFRange(location: 0, length: len), nil, constraint, nil)
-        let h = ceil(fit.height) + 1
+        // One layout pass: frame into a very tall rect, measure from the lines (skips
+        // CTFramesetterSuggestFrameSizeWithConstraints, which would lay out a second time).
+        let h: CGFloat = 1_000_000
         let path = CGPath(rect: CGRect(x: 0, y: 0, width: max(1, width), height: h), transform: nil)
         let frame = CTFramesetterCreateFrame(setter, CFRange(location: 0, length: len), path, nil)
         let ls = (CTFrameGetLines(frame) as? [CTLine]) ?? []
@@ -56,7 +55,7 @@ final class TextBox {
         lineX = x
         lineTop = t
         lineBottom = bt
-        let height = max(h, (bt.last ?? origin.y) - origin.y)
+        let height = ceil((bt.last ?? origin.y) - origin.y) + 1
         rect = CGRect(x: origin.x, y: origin.y, width: width, height: height)
         utf16Count = len
         let p = text.base + start
@@ -74,6 +73,17 @@ final class TextBox {
             }
             map[end - start] = u
             utf16 = map
+        }
+    }
+
+    /// Moves the box down by `dy` (after parallel layout in block-local coordinates).
+    func translate(_ dy: CGFloat) {
+        if dy == 0 { return }
+        rect.origin.y += dy
+        for i in baselines.indices {
+            baselines[i] += dy
+            lineTop[i] += dy
+            lineBottom[i] += dy
         }
     }
 
@@ -101,6 +111,7 @@ final class TextBox {
 
     // MARK: - Drawing
 
+    @MainActor
     func draw(_ ctx: CGContext, rect clip: CGRect, palette: Palette, highlights h: Highlights,
               content: MarkdownContent) {
         guard rect.intersects(clip) else { return }
@@ -144,6 +155,7 @@ final class TextBox {
     }
 
     /// Inline code/kbd backgrounds (before text), strikethrough and images (after).
+    @MainActor
     private func decorate(_ ctx: CGContext, line: CTLine, index i: Int, palette: Palette, content: MarkdownContent, before: Bool) {
         guard let runs = CTLineGetGlyphRuns(line) as? [CTRun] else { return }
         for run in runs {

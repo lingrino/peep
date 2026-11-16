@@ -44,6 +44,7 @@ func render(_ args: [String]) {
     let t0 = nanotime()
     let doc = Document.open(path: path)
     view.show(doc)
+    (doc.content as? MarkdownContent)?.finishLayout()
     view.layoutSubtreeIfNeeded()
     if wait > 0 { RunLoop.main.run(until: Date(timeIntervalSinceNow: wait)); view.layoutSubtreeIfNeeded() }
     if scrollY > 0 { view.documentView.scrollToTop(y: scrollY) }
@@ -176,6 +177,75 @@ func types(_ args: [String]) {
     for t in list where !exclude.contains(t) { print("\t\t\t\t<string>\(t)</string>") }
 }
 
+/// Opens, renders (top, middle, bottom) and searches every file under the given paths.
+/// Run with CONFIG=debug to turn memory-safety bugs into traps.
+@MainActor
+func smoke(_ args: [String]) {
+    var files: [String] = []
+    let fm = FileManager.default
+    for a in args {
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: a, isDirectory: &isDir), isDir.boolValue {
+            let e = fm.enumerator(atPath: a)
+            while let f = e?.nextObject() as? String {
+                var d: ObjCBool = false
+                let full = a + "/" + f
+                if fm.fileExists(atPath: full, isDirectory: &d), !d.boolValue { files.append(full) }
+            }
+        } else { files.append(a) }
+    }
+    let size = NSSize(width: 900, height: 700)
+    let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+    let view = PreviewView(frame: NSRect(origin: .zero, size: size))
+    window.contentView = view
+    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+    var worst: [(Double, String)] = []
+    var total = 0.0
+    for (i, f) in files.enumerated() {
+        let t0 = nanotime()
+        let doc = Document.open(path: f)
+        view.show(doc)
+        view.layoutSubtreeIfNeeded()
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let first = Double(nanotime() - t0) / 1e6
+        let h = view.documentView.bounds.height
+        for y in [h / 2, h] {
+            view.documentView.scrollToTop(y: y)
+            view.cacheDisplay(in: view.bounds, to: rep)
+        }
+        _ = view.find("e")
+        view.documentView.selectAll()
+        view.cacheDisplay(in: view.bounds, to: rep)
+        view.clearFind()
+        total += first
+        worst.append((first, (f as NSString).lastPathComponent))
+        if (i + 1) % 200 == 0 { print("\(i + 1)/\(files.count)") }
+    }
+    worst.sort { $0.0 > $1.0 }
+    print("\(files.count) files, mean first paint \(String(format: "%.2f", total / Double(max(1, files.count))))ms")
+    for (t, f) in worst.prefix(8) { print(String(format: "  %7.2fms  %@", t, f)) }
+}
+
+/// Markdown parse + layout timing, repeated (for profiling).
+@MainActor
+func mdbench(_ args: [String]) {
+    let n = args.count > 1 ? Int(args[1]) ?? 20 : 20
+    let f = try! FileLoader.load(path: args[0], limit: 1 << 30)
+    guard case .text(let text, _, _) = Decoder.decode(f.raw) else { return }
+    var parse = UInt64.max, layout = UInt64.max
+    for _ in 0..<n {
+        let t0 = nanotime()
+        let md = MarkdownParser.parse(text)
+        let t1 = nanotime()
+        let c = MarkdownContent(doc: md, baseDir: nil)
+        _ = c.setPalette(.light)
+        _ = c.layout(width: 800)
+        let t2 = nanotime()
+        parse = min(parse, t1 - t0); layout = min(layout, t2 - t1)
+    }
+    print(String(format: "parse %.2fms (%.0f MB/s), layout %.2fms", Double(parse) / 1e6, Double(text.count) / Double(parse) * 1e3, Double(layout) / 1e6))
+}
+
 /// Dump markdown layout (blocks, boxes) for debugging.
 @MainActor
 func layoutDump(_ args: [String]) {
@@ -212,6 +282,8 @@ MainActor.assumeIsolated {
     case "lexbench": lexbench(Array(args.dropFirst()))
     case "layout": layoutDump(Array(args.dropFirst()))
     case "types": types(Array(args.dropFirst()))
+    case "smoke": smoke(Array(args.dropFirst()))
+    case "mdbench": mdbench(Array(args.dropFirst()))
     default: print("unknown command"); exit(2)
     }
 }

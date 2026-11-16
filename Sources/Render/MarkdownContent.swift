@@ -15,17 +15,8 @@ public final class MarkdownContent: DocumentContent {
     var palette: Palette = .light
     private var width: CGFloat = 0
     let images: ImageStore
-
-    // Metrics (points). Body size follows the user's preference (Peek used 12-13).
-    let body: CGFloat = 13
-    var gap: CGFloat { body * 0.95 }                 // between blocks
-    var tightGap: CGFloat { body * 0.25 }            // between items of a tight list
-    let maxWidth: CGFloat = 880
-    let padX: CGFloat = 28
-    let padTop: CGFloat = 22
-    let listIndent: CGFloat = 24
-    let quoteIndent: CGFloat = 18
-    let codePad: CGFloat = 12
+    let m = MDMetrics()
+    let fonts = FontBook()
 
     struct LBlock {
         var y: CGFloat
@@ -34,20 +25,11 @@ public final class MarkdownContent: DocumentContent {
         var boxN: Int
     }
 
-    enum Role { case border, blockBackground, secondary, text, accent }
-    enum Deco {
-        case fill(CGRect, Role, CGFloat)
-        case stroke(CGRect, Role, CGFloat)
-        case line(CGRect, Role)
-        case bullet(CGPoint, Int)                 // center, depth
-        case label(CTLine, CGPoint)               // ordered list number, right-aligned origin
-        case check(CGRect, Bool)
-    }
-
     private(set) var blocks: [LBlock] = []
     private(set) var boxes: [TextBox] = []
-    private var decos: [(minY: CGFloat, maxY: CGFloat, deco: Deco)] = []
+    private var decos: [PlacedDeco] = []
     private(set) var headingY: [CGFloat] = []
+    public private(set) var lastLayoutNanos: UInt64 = 0
 
     /// Called when async work (images) needs a relayout.
     public var onNeedsLayout: (() -> Void)?
@@ -76,288 +58,143 @@ public final class MarkdownContent: DocumentContent {
 
     // MARK: - Layout
 
+    /// Progressive layout: blocks are laid out synchronously until ~two screens of content
+    /// exist (first paint never waits for the whole document), the rest get estimated
+    /// heights, and a background pass lays out everything in parallel and swaps it in.
+    /// Queries that need exact geometry below the fold call `finishLayout()`.
     func relayout() {
+        let t0 = nanotime()
         images.start()
+        generation &+= 1
+        let gen = generation
+        let contentW = min(m.maxWidth, max(200, width - 2 * m.padX))
+        let x0 = max(m.padX, ((width - contentW) / 2).rounded())
+        let env = LayoutEnv(doc: doc, palette: palette, m: m, fonts: fonts,
+                            imageSizes: images.sizes(maxWidth: max(40, contentW)), x0: x0, contentW: contentW)
+        let n = doc.blocks.count
+        var results = [BlockLayout]()
+        results.reserveCapacity(n)
+        var y: CGFloat = 0
+        var k = 0
+        while k < n && y < MarkdownContent.syncBudget {
+            let r = MarkdownLayout.block(k, env)
+            y += r.height + m.gap
+            results.append(r)
+            k += 1
+        }
+        if k == n {
+            pending = nil
+            stack(results, x0: x0)
+            lastLayoutNanos = nanotime() - t0
+            return
+        }
+        for i in k..<n { results.append(MarkdownLayout.estimate(i, env)) }
+        stack(results, x0: x0)
+        lastLayoutNanos = nanotime() - t0
+
+        // Background: everything after the prefix, in parallel.
+        let job = PendingLayout(first: k, count: n - k, x0: x0, prefix: results[0..<k])
+        pending = job
+        nonisolated(unsafe) let jobRef = job
+        weak let weakSelf = self
+        nonisolated(unsafe) let owner = weakSelf
+        DispatchQueue.global(qos: .userInitiated).async {
+            jobRef.run(env)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self = owner, self.generation == gen, self.pending === jobRef else { return }
+                    self.adopt(jobRef)
+                    self.onLayoutChanged?()
+                }
+            }
+        }
+    }
+
+    /// Content laid out synchronously before first paint (points).
+    static let syncBudget: CGFloat = 2400
+
+    private var generation = 0
+    private var pending: PendingLayout?
+
+    /// Called after background layout lands (resize + repaint, no relayout).
+    public var onLayoutChanged: (() -> Void)?
+
+    public func willShow(_ rect: CGRect) {
+        guard let job = pending, job.first < blocks.count else { return }
+        if rect.maxY > blocks[job.first].y { finishLayout() }
+    }
+
+    /// Blocks until background layout is done and adopts it (exact geometry everywhere).
+    public func finishLayout() {
+        guard let job = pending else { return }
+        job.wait()
+        adopt(job)
+        onLayoutChanged?()
+    }
+
+    private func adopt(_ job: PendingLayout) {
+        guard pending === job else { return }
+        pending = nil
+        var all = Array(job.prefix)
+        all.append(contentsOf: job.results)
+        stack(all, x0: job.x0)
+    }
+
+    /// Places laid-out blocks vertically and adds the decorations that depend on neighbors.
+    private func stack(_ results: [BlockLayout], x0: CGFloat) {
         blocks.removeAll(keepingCapacity: true)
         boxes.removeAll(keepingCapacity: true)
         decos.removeAll(keepingCapacity: true)
         headingY = [CGFloat](repeating: 0, count: doc.headings.count)
-        let contentW = min(maxWidth, max(200, width - 2 * padX))
-        let x0 = max(padX, ((width - contentW) / 2).rounded())
-        var y = padTop
-        var maxRight = x0 + contentW
+        var y = m.padTop
+        var maxRight = x0
         var prevQuote: UInt8 = 0
         for (bi, b) in doc.blocks.enumerated() {
-            let indent = CGFloat(b.quoteDepth) * quoteIndent + CGFloat(b.listDepth) * listIndent
-            let bx = x0 + indent
-            let bw = max(60, contentW - indent)
+            let r = results[bi]
             if bi > 0 {
-                var g = b.tight ? tightGap : gap
-                if b.kind == .heading { g = max(g, body * (b.level <= 2 ? 1.9 : 1.5)) }
+                var g = b.tight ? m.tightGap : m.gap
+                if b.kind == .heading { g = max(g, m.body * (b.level <= 2 ? 1.9 : 1.5)) }
                 y += g
             }
             let top = y
             let box0 = boxes.count
-            switch b.kind {
-            case .paragraph, .html, .footnote:
-                let a = inline(b.textStart, b.textEnd, runs: b.runStart..<b.runEnd, font: font(body),
-                               color: b.quoteDepth > 0 ? palette.secondaryText : palette.text, align: b.align)
-                let box = TextBox(attributed: a, origin: CGPoint(x: bx, y: y), width: bw, start: Int(b.textStart),
-                                  end: Int(b.textEnd), text: doc.text, lineGap: lineGap(body))
-                boxes.append(box)
-                y = box.rect.maxY
-            case .heading:
-                let size = headingSize(b.level)
-                let a = inline(b.textStart, b.textEnd, runs: b.runStart..<b.runEnd,
-                               font: font(size, weight: .semibold),
-                               color: b.level == 6 ? palette.secondaryText : palette.text, align: b.align, lineHeight: 1.25)
-                let box = TextBox(attributed: a, origin: CGPoint(x: bx, y: y), width: bw, start: Int(b.textStart),
-                                  end: Int(b.textEnd), text: doc.text, lineGap: lineGap(size, 1.25))
-                boxes.append(box)
-                y = box.rect.maxY
-                if b.heading >= 0 { headingY[Int(b.heading)] = top }
-                if b.level <= 2 {
-                    y += body * 0.45
-                    decos.append((y, y + 1, .line(CGRect(x: bx, y: y, width: bw, height: 1), .border)))
-                    y += 1
-                }
-            case .code:
-                let a = code(b)
-                let box = TextBox(attributed: a, origin: CGPoint(x: bx + codePad, y: y + codePad), width: bw - 2 * codePad,
-                                  start: Int(b.textStart), end: Int(b.textEnd), text: doc.text, lineGap: lineGap(codeSize, 1.45))
-                let bg = CGRect(x: bx, y: y, width: bw, height: box.rect.height + 2 * codePad)
-                decos.append((bg.minY, bg.maxY, .fill(bg, .blockBackground, 6)))
-                boxes.append(box)
-                y = bg.maxY
-            case .rule:
-                y += body * 0.4
-                decos.append((y, y + 2, .fill(CGRect(x: bx, y: y, width: bw, height: 2), .border, 1)))
-                y += 2 + body * 0.4
-            case .table:
-                y = table(Int(b.table), x: bx, y: y, width: bw, right: &maxRight)
-            }
+            for box in r.boxes { box.translate(top); boxes.append(box) }
+            for d in r.decos { decos.append(PlacedDeco(minY: d.minY + top, maxY: d.maxY + top, deco: d.deco.offset(top))) }
+            y = top + r.height
+            maxRight = max(maxRight, r.right)
+            if b.kind == .heading && b.heading >= 0 { headingY[Int(b.heading)] = top }
 
             // List marker beside the block's first line.
-            if b.marker != .none, let first = boxes.indices.contains(box0) ? boxes[box0] : nil, boxes.count > box0 {
-                let base = first.baselines.first ?? (top + body)
-                let mx = bx - 8
+            if b.marker != .none, let fb = r.firstBaseline {
+                let base = top + fb
+                let indent = CGFloat(b.quoteDepth) * m.quoteIndent + CGFloat(b.listDepth) * m.listIndent
+                let mx = x0 + indent - 8
                 switch b.marker {
                 case .bullet:
-                    decos.append((base - body, base, .bullet(CGPoint(x: mx - 4, y: base - body * 0.32), Int(b.listDepth))))
+                    decos.append(PlacedDeco(minY: base - m.body, maxY: base, deco: .bullet(CGPoint(x: mx - 4, y: base - m.body * 0.32), Int(b.listDepth))))
                 case .ordered:
                     let l = CTLineCreateWithAttributedString(NSAttributedString(string: "\(b.markerNumber).", attributes: [
-                        .font: font(body), .foregroundColor: palette.secondaryText]))
-                    decos.append((base - body, base + 4, .label(l, CGPoint(x: mx, y: base))))
+                        .font: fonts.font(m.body), .foregroundColor: palette.secondaryText]))
+                    decos.append(PlacedDeco(minY: base - m.body, maxY: base + 4, deco: .label(l, CGPoint(x: mx, y: base))))
                 case .taskOpen, .taskDone:
-                    let s = body * 0.95
-                    decos.append((base - s, base, .check(CGRect(x: mx - s, y: base - s * 0.88, width: s, height: s), b.marker == .taskDone)))
+                    let s = m.body * 0.95
+                    decos.append(PlacedDeco(minY: base - s, maxY: base, deco: .check(CGRect(x: mx - s, y: base - s * 0.88, width: s, height: s), b.marker == .taskDone)))
                 case .none: break
                 }
-            } else if b.marker != .none {
-                // Empty list item: marker on its own line.
-                let base = y + body
-                if b.marker == .bullet { decos.append((y, base, .bullet(CGPoint(x: bx - 12, y: base - body * 0.32), Int(b.listDepth)))) }
-                y += body * 1.4
             }
-
             // Quote bars span the block and the gap above it when the previous block was quoted too.
             if b.quoteDepth > 0 {
                 for q in 0..<Int(b.quoteDepth) {
-                    let qx = x0 + CGFloat(q) * quoteIndent + CGFloat(b.listDepth) * 0
-                    let from = q < Int(prevQuote) && bi > 0 ? top - (b.tight ? tightGap : gap) : top
-                    decos.append((from, y, .fill(CGRect(x: qx, y: from, width: 3, height: y - from), .border, 1.5)))
+                    let qx = x0 + CGFloat(q) * m.quoteIndent
+                    let from = q < Int(prevQuote) && bi > 0 ? top - (b.tight ? m.tightGap : m.gap) : top
+                    decos.append(PlacedDeco(minY: from, maxY: y, deco: .fill(CGRect(x: qx, y: from, width: 3, height: y - from), .border, 1.5)))
                 }
             }
             prevQuote = b.quoteDepth
             blocks.append(LBlock(y: top, h: y - top, box0: box0, boxN: boxes.count - box0))
         }
-        size = CGSize(width: max(width, maxRight + padX), height: y + padTop * 1.5)
+        size = CGSize(width: max(width, maxRight + m.padX), height: y + m.padTop * 1.5)
         decos.sort { $0.minY < $1.minY }
-    }
-
-    var codeSize: CGFloat { (body * 0.88).rounded() + 0.5 }
-
-    func headingSize(_ level: UInt8) -> CGFloat {
-        switch level {
-        case 1: return (body * 1.9).rounded()
-        case 2: return (body * 1.5).rounded()
-        case 3: return (body * 1.25).rounded()
-        case 4: return body + 1
-        case 5: return body
-        default: return body - 0.5
-        }
-    }
-
-    func lineGap(_ size: CGFloat, _ multiple: CGFloat = 1.5) -> CGFloat { size * (multiple - 1.2) }
-
-    // MARK: - Fonts
-
-    private var fontCache: [Int: NSFont] = [:]
-
-    /// Fonts keyed by size/weight/italic/mono (a handful per document).
-    func font(_ size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false, mono: Bool = false) -> NSFont {
-        let key = Int(size * 4) << 8 | Int((weight.rawValue + 1) * 10) << 2 | (italic ? 2 : 0) | (mono ? 1 : 0)
-        if let f = fontCache[key] { return f }
-        var f = mono ? NSFont.monospacedSystemFont(ofSize: size, weight: weight) : NSFont.systemFont(ofSize: size, weight: weight)
-        if italic {
-            let d = f.fontDescriptor.withSymbolicTraits(.italic)
-            f = NSFont(descriptor: d, size: size) ?? f
-        }
-        fontCache[key] = f
-        return f
-    }
-
-    // MARK: - Attributed strings
-
-    /// Rich text for `[start, end)` of the rendered text with the given runs applied.
-    func inline(_ start: Int32, _ end: Int32, runs: Range<Int32>, font base: NSFont, color: CGColor,
-                align: MDAlign, lineHeight: CGFloat = 1.5) -> NSAttributedString {
-        let s = doc.text.string(Int(start), Int(end))
-        let ps = NSMutableParagraphStyle()
-        ps.lineHeightMultiple = lineHeight
-        ps.alignment = align == .center ? .center : align == .right ? .right : .natural
-        let a = NSMutableAttributedString(string: s, attributes: [.font: base, .foregroundColor: color, .paragraphStyle: ps])
-        let map = Utf16Map(doc.text, Int(start), Int(end))
-        let size = base.pointSize
-        let weight: NSFont.Weight = (base.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any])?[.weight]
-            .flatMap { $0 as? CGFloat }.map { NSFont.Weight($0) } ?? .regular
-        for ri in runs {
-            let r = doc.runs[Int(ri)]
-            let range = NSRange(location: map[Int(r.start)], length: map[Int(r.end)] - map[Int(r.start)])
-            if range.length <= 0 { continue }
-            let st = r.style
-            if st.contains(.image) {
-                let (w, h) = images.size(Int(r.ref), maxWidth: max(40, width - 2 * padX))
-                a.addAttribute(kCTRunDelegateAttributeName as NSAttributedString.Key, value: runDelegate(width: w, ascent: h), range: range)
-                a.addAttribute(MDAttr.image, value: Int(r.ref), range: range)
-                a.addAttribute(.foregroundColor, value: CGColor.clear, range: range)
-                continue
-            }
-            var f = base
-            if st.contains(.code) || st.contains(.kbd) {
-                f = font((size * 0.88).rounded() + 0.5, weight: st.contains(.strong) ? .semibold : .regular, mono: true)
-                a.addAttribute(st.contains(.kbd) ? MDAttr.kbd : MDAttr.inlineCode, value: true, range: range)
-            } else if st.contains(.strong) || st.contains(.emphasis) || st.contains(.superscript) || st.contains(.subscriptStyle) {
-                let sz = st.contains(.superscript) || st.contains(.subscriptStyle) ? size * 0.75 : size
-                f = font(sz, weight: st.contains(.strong) ? .semibold : weight, italic: st.contains(.emphasis))
-            }
-            a.addAttribute(.font, value: f, range: range)
-            // Baseline offsets are negated: we draw in a flipped context (text matrix y = -1),
-            // where Core Text's "up" offset lands below the baseline.
-            if st.contains(.superscript) { a.addAttribute(ctBaselineOffset, value: -size * 0.38, range: range) }
-            if st.contains(.subscriptStyle) { a.addAttribute(ctBaselineOffset, value: size * 0.18, range: range) }
-            if st.contains(.strike) { a.addAttribute(MDAttr.strike, value: true, range: range) }
-            if st.contains(.link) {
-                a.addAttribute(.foregroundColor, value: palette.link, range: range)
-                a.addAttribute(MDAttr.link, value: Int(r.ref), range: range)
-            }
-        }
-        return a
-    }
-
-    /// Code block: monospaced, syntax colored with the same lexers as code previews.
-    func code(_ b: MDBlock) -> NSAttributedString {
-        let s = doc.text.string(Int(b.textStart), Int(b.textEnd))
-        let f = font(codeSize, mono: true)
-        let bold = font(codeSize, weight: .semibold, mono: true)
-        let ps = NSMutableParagraphStyle()
-        ps.lineHeightMultiple = 1.45
-        ps.defaultTabInterval = 4 * (" " as NSString).size(withAttributes: [.font: f]).width
-        ps.tabStops = []
-        let a = NSMutableAttributedString(string: s, attributes: [.font: f, .foregroundColor: palette.text, .paragraphStyle: ps])
-        if b.language != .plain && b.textEnd > b.textStart {
-            let tokens = TokenStream(expectedBytes: Int(b.textEnd - b.textStart))
-            // Lex in place: the text after the block is "\n", which ends every token cleanly.
-            b.language.lex(doc.text.base, Int(b.textStart), Int(b.textEnd), tokens)
-            let map = Utf16Map(doc.text, Int(b.textStart), Int(b.textEnd))
-            var k = tokens.first(after: Int(b.textStart))
-            while k < tokens.count && tokens.start(k) < Int(b.textEnd) {
-                let kind = tokens.kinds[k]
-                if kind != 0 {
-                    let ts = max(tokens.start(k), Int(b.textStart)), te = min(tokens.end(k), Int(b.textEnd))
-                    let range = NSRange(location: map[ts], length: map[te] - map[ts])
-                    a.addAttribute(.foregroundColor, value: palette.tokenColors[Int(kind)], range: range)
-                    if palette.tokenBold[Int(kind)] { a.addAttribute(.font, value: bold, range: range) }
-                }
-                k += 1
-            }
-        }
-        return a
-    }
-
-    private func runDelegate(width: CGFloat, ascent: CGFloat) -> CTRunDelegate {
-        let p = UnsafeMutablePointer<CGSize>.allocate(capacity: 1)
-        p.initialize(to: CGSize(width: width, height: ascent))
-        var cb = CTRunDelegateCallbacks(version: kCTRunDelegateVersion1, dealloc: { $0.deallocate() },
-                                        getAscent: { $0.assumingMemoryBound(to: CGSize.self).pointee.height },
-                                        getDescent: { _ in 0 },
-                                        getWidth: { $0.assumingMemoryBound(to: CGSize.self).pointee.width })
-        return CTRunDelegateCreate(&cb, p)!
-    }
-
-    // MARK: - Tables
-
-    private func table(_ ti: Int, x: CGFloat, y: CGFloat, width: CGFloat, right: inout CGFloat) -> CGFloat {
-        let t = doc.tables[ti]
-        let cols = t.columns, rows = t.rows
-        if cols == 0 || rows == 0 { return y }
-        let padH: CGFloat = 12, padV: CGFloat = 6
-        let headerFont = font(body, weight: .semibold), cellFont = font(body)
-        // Attributed strings and natural (single-line) widths.
-        var strings: [NSAttributedString] = []
-        var natural = [CGFloat](repeating: 40, count: cols)
-        for (i, c) in t.cells.enumerated() {
-            let a = inline(c.textStart, c.textEnd, runs: c.runStart..<c.runEnd, font: i < cols ? headerFont : cellFont,
-                           color: palette.text, align: t.aligns[i % cols], lineHeight: 1.35)
-            strings.append(a)
-            let line = CTLineCreateWithAttributedString(a)
-            natural[i % cols] = max(natural[i % cols], CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)) + 2 * padH + 1)
-        }
-        // Fit: natural widths if they fit, else shrink wide columns proportionally (min 80).
-        var widths = natural
-        let total = natural.reduce(0, +)
-        if total > width {
-            let minW: CGFloat = 80
-            let flexible = natural.map { max(0, $0 - minW) }.reduce(0, +)
-            let excess = total - width
-            for c in 0..<cols where natural[c] > minW {
-                widths[c] = natural[c] - excess * (natural[c] - minW) / max(1, flexible)
-                widths[c] = max(minW, widths[c].rounded(.down))
-            }
-        }
-        let tableW = widths.reduce(0, +)
-        right = max(right, x + tableW)
-        var rowY = y
-        for r in 0..<rows {
-            var cx = x
-            var rowH: CGFloat = 0
-            let first = boxes.count
-            for c in 0..<cols {
-                let i = r * cols + c
-                let cell = t.cells[i]
-                let box = TextBox(attributed: strings[i], origin: CGPoint(x: cx + padH, y: rowY + padV),
-                                  width: widths[c] - 2 * padH, start: Int(cell.textStart), end: Int(cell.textEnd),
-                                  text: doc.text, lineGap: lineGap(body, 1.35))
-                boxes.append(box)
-                rowH = max(rowH, box.rect.height + 2 * padV)
-                cx += widths[c]
-            }
-            _ = first
-            let rowRect = CGRect(x: x, y: rowY, width: tableW, height: rowH)
-            if r == 0 || r % 2 == 0 {
-                decos.append((rowRect.minY, rowRect.maxY, .fill(rowRect, .blockBackground, 0)))
-            }
-            // Grid lines.
-            decos.append((rowRect.maxY - 0.5, rowRect.maxY + 0.5, .line(CGRect(x: x, y: rowRect.maxY - 0.5, width: tableW, height: 1), .border)))
-            var vx = x
-            for c in 0...cols {
-                decos.append((rowRect.minY, rowRect.maxY, .line(CGRect(x: vx - 0.5, y: rowRect.minY, width: 1, height: rowH), .border)))
-                if c < cols { vx += widths[c] }
-            }
-            rowY += rowH
-        }
-        decos.append((y - 0.5, y + 0.5, .line(CGRect(x: x, y: y - 0.5, width: tableW, height: 1), .border)))
-        return rowY
     }
 
     // MARK: - Drawing
@@ -381,7 +218,7 @@ public final class MarkdownContent: DocumentContent {
     }
 
     private func drawDeco(_ d: Deco, _ ctx: CGContext, _ p: Palette) {
-        func color(_ r: Role) -> CGColor {
+        func color(_ r: DecoRole) -> CGColor {
             switch r {
             case .border: p.border
             case .blockBackground: p.blockBackground
@@ -397,10 +234,6 @@ public final class MarkdownContent: DocumentContent {
                 ctx.addPath(CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil))
                 ctx.fillPath()
             } else { ctx.fill(r) }
-        case .stroke(let r, let role, let radius):
-            ctx.setStrokeColor(color(role))
-            ctx.addPath(CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil))
-            ctx.strokePath()
         case .line(let r, let role):
             ctx.setFillColor(color(role))
             ctx.fill(r)
@@ -502,6 +335,7 @@ public final class MarkdownContent: DocumentContent {
     }
 
     public func rect(for start: Int, _ end: Int) -> CGRect {
+        if pending != nil && (box(containing: start).map { boxes[$0].end < start } ?? true) { finishLayout() }
         guard let k = box(containing: start) else { return .zero }
         return boxes[k].rect(for: start, end)
     }
@@ -564,6 +398,7 @@ public final class MarkdownContent: DocumentContent {
     }
 
     public func anchorY(_ name: String) -> CGFloat? {
+        finishLayout()
         let n = name.hasPrefix("#") ? String(name.dropFirst()) : name
         let key = n.removingPercentEncoding ?? n
         guard let i = doc.headings.firstIndex(where: { $0.slug == key || $0.slug == key.lowercased() }) else { return nil }

@@ -87,6 +87,7 @@ public final class Document {
         doc.timings = times
         doc.path = path
         if prefixEnd < text.count {
+            let text = text, lang = lang
             DispatchQueue.global(qos: .userInitiated).async {
                 let t0 = nanotime()
                 let full = TokenStream(expectedBytes: text.count)

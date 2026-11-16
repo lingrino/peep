@@ -24,6 +24,8 @@ def main():
     focus = os.environ.get("FOCUS")   # function-name substring: report hot instruction offsets
     addrs = collections.Counter(); loads = {}
     selfc = collections.Counter(); total = collections.Counter(); n = 0
+    waiter = os.environ.get("WAITER")   # e.g. "__ulock_wait2": who calls it
+    callers = collections.Counter()
     for row in root.iter("row"):
         bt = row.find("tagged-backtrace")
         if bt is None:
@@ -45,6 +47,8 @@ def main():
             continue
         n += 1
         selfc[frames[0]] += 1
+        if waiter and frames[0] == waiter:
+            callers[" <- ".join(frames[1:5])] += 1
         for f in set(frames):
             total[f] += 1
     def short(s):
@@ -56,6 +60,10 @@ def main():
         print(f"-- hot offsets in {focus} (binary-relative; add 0x100000000 for otool) --")
         for a, c in addrs.most_common(40):
             print(f"{100*c/n:6.2f}%  0x{a + 0x100000000:x}")
+    if waiter:
+        print(f"-- callers of {waiter} --")
+        for f, c in callers.most_common(8):
+            print(f"{100*c/n:6.1f}%  {f[:300]}")
     print("-- total --")
     for f, c in total.most_common(top):
         print(f"{100*c/n:6.1f}%  {short(f)}")

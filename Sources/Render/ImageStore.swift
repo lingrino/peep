@@ -69,6 +69,11 @@ final class ImageStore {
 
     func image(_ i: Int) -> CGImage? { i < slots.count ? slots[i].image : nil }
 
+    /// Display sizes of all images (snapshot for a parallel layout pass).
+    func sizes(maxWidth: CGFloat) -> [CGSize] {
+        (0..<slots.count).map { let (w, h) = size($0, maxWidth: maxWidth); return CGSize(width: w, height: h) }
+    }
+
     /// Display size in points: HTML width/height attributes win, else natural size, scaled
     /// down to fit `maxWidth`. Unloaded images reserve a small square.
     func size(_ i: Int, maxWidth: CGFloat) -> (CGFloat, CGFloat) {

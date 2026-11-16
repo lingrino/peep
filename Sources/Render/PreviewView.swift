@@ -98,11 +98,17 @@ public final class PreviewView: NSView {
                 md?.relayout()
                 self?.documentView.contentDidChangeLayout()
             }
+            md.onLayoutChanged = { [weak self] in
+                self?.documentView.contentDidChangeLayout()
+                self?.updateOutlineCurrent()
+            }
             if md.doc.headings.count >= 3 {
                 let o = OutlineView(frame: NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height))
                 o.setHeadings(md.doc.headings)
                 o.onSelect = { [weak self, weak md] i in
-                    guard let md, i < md.headingY.count else { return }
+                    guard let md else { return }
+                    md.finishLayout()
+                    guard i < md.headingY.count else { return }
                     self?.documentView.scrollToTop(y: md.headingY[i] - 12)
                 }
                 addSubview(o, positioned: .below, relativeTo: scrollView)
