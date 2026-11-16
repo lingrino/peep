@@ -124,7 +124,15 @@ public final class DocumentView: NSView {
 
     // MARK: - Content
 
+    /// When content was set (for first-paint timing), 0 once the first tile has drawn.
+    private var contentSetAt: UInt64 = 0
+    private var tilesDrawnSinceSet = 0
+    private var drawNanos: UInt64 = 0
+
     public func setContent(_ c: DocumentContent, width: CGFloat) {
+        contentSetAt = nanotime()
+        tilesDrawnSinceSet = 0
+        drawNanos = 0
         content = c
         anchor = 0; head = 0
         palette = Palette.current(for: self)
@@ -253,6 +261,21 @@ public final class DocumentView: NSView {
 
     func render(tile: TileView, ctx: CGContext, dirty: NSRect) {
         guard let c = content else { return }
+        let t0 = nanotime()
+        defer {
+            if contentSetAt != 0 {
+                drawNanos += nanotime() - t0
+                tilesDrawnSinceSet += 1
+                // Log once the first screenful of tiles is done (next runloop turn).
+                if tilesDrawnSinceSet == 1 {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.contentSetAt != 0 else { return }
+                        renderLog.debug("first paint: \(self.tilesDrawnSinceSet) tiles drawn in \(Double(self.drawNanos) / 1e6)ms, \(Double(nanotime() - self.contentSetAt) / 1e6)ms after setContent")
+                        self.contentSetAt = 0
+                    }
+                }
+            }
+        }
         let origin = tile.frame.origin
         ctx.setFillColor(palette.background)
         ctx.fill(dirty)

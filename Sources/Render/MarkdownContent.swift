@@ -281,8 +281,28 @@ public final class MarkdownContent: DocumentContent {
 
     func drawImage(_ index: Int, in r: CGRect, ctx: CGContext) {
         guard let img = images.image(index) else {
+            if r.width < 2 || r.height < 2 { return }
+            let path = CGPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 6, cornerHeight: 6, transform: nil)
             ctx.setFillColor(palette.blockBackground)
-            ctx.fill(r)
+            ctx.addPath(path)
+            ctx.fillPath()
+            if images.failed(index) {
+                // Like a browser: keep the reserved space, show the alt text.
+                ctx.setStrokeColor(palette.border)
+                ctx.setLineWidth(1)
+                ctx.addPath(path)
+                ctx.strokePath()
+                let alt = images.alt(index)
+                if !alt.isEmpty && r.height >= 18 {
+                    let line = CTLineCreateWithAttributedString(NSAttributedString(string: alt, attributes: [
+                        .font: fonts.font(m.body - 1), .foregroundColor: palette.secondaryText]))
+                    let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+                    if w < r.width - 8 {
+                        ctx.textPosition = CGPoint(x: r.midX - w / 2, y: r.midY + 4)
+                        CTLineDraw(line, ctx)
+                    }
+                }
+            }
             return
         }
         // The context is flipped: draw the CGImage upside down so it appears upright.

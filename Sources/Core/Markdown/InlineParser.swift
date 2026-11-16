@@ -31,6 +31,17 @@ final class InlineContext {
     var pendingDarkSource: String?
 
     init(refs: [String: (String, String)]) { self.refs = refs }
+
+    private var spare: InlineParser.State?
+
+    func takeState() -> InlineParser.State {
+        guard var s = spare else { return InlineParser.State() }
+        spare = nil
+        s.reset()
+        return s
+    }
+
+    func returnState(_ s: InlineParser.State) { spare = s }
 }
 
 enum InlineParser {
@@ -57,6 +68,15 @@ enum InlineParser {
         var head: Int32 = -1
         var delims: [Int32] = []    // stack of delimiter node indices (emphasis)
         var brackets: [(node: Int32, delimBottom: Int)] = []
+
+        mutating func reset() {
+            nodes.removeAll(keepingCapacity: true)
+            scratch.removeAll(keepingCapacity: true)
+            delims.removeAll(keepingCapacity: true)
+            brackets.removeAll(keepingCapacity: true)
+            head = -1
+            tail = -1
+        }
 
         @discardableResult
         mutating func add(_ n: Node) -> Int32 {
@@ -123,13 +143,14 @@ enum InlineParser {
 
     // MARK: - Entry
 
-    /// Parses `src[0..<n]` and appends rendered text + runs to `ctx`.
+    /// Parses `src[0..<n]` and appends rendered text + runs to `ctx`. Working arrays live in
+    /// `ctx.scratchState` and are reused across blocks (no per-paragraph allocations).
     static func parse(_ src: UnsafePointer<UInt8>, _ n: Int, _ ctx: InlineContext, baseStyle: MDStyle = []) {
-        var st = State()
-        st.nodes.reserveCapacity(n / 4 + 8)
+        var st = ctx.takeState()
         tokenize(src, n, &st, ctx)
         processEmphasis(&st, bottom: 0)
         emit(&st, ctx, baseStyle: baseStyle)
+        ctx.returnState(st)
     }
 
     // MARK: - Tokenize

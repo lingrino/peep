@@ -226,6 +226,21 @@ func smoke(_ args: [String]) {
     for (t, f) in worst.prefix(8) { print(String(format: "  %7.2fms  %@", t, f)) }
 }
 
+/// Markdown parse only, repeated (for profiling the parser).
+@MainActor
+func parsebench(_ args: [String]) {
+    let n = args.count > 1 ? Int(args[1]) ?? 200 : 200
+    let f = try! FileLoader.load(path: args[0], limit: 1 << 30)
+    guard case .text(let text, _, _) = Decoder.decode(f.raw) else { return }
+    var best = UInt64.max
+    for _ in 0..<n {
+        let t0 = nanotime()
+        _ = MarkdownParser.parse(text)
+        best = min(best, nanotime() - t0)
+    }
+    print(String(format: "parse %.3fms (%.0f MB/s)", Double(best) / 1e6, Double(text.count) / Double(best) * 1e3))
+}
+
 /// Markdown parse + layout timing, repeated (for profiling).
 @MainActor
 func mdbench(_ args: [String]) {
@@ -369,6 +384,7 @@ MainActor.assumeIsolated {
     case "types": types(Array(args.dropFirst()))
     case "smoke": smoke(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
+    case "parsebench": parsebench(Array(args.dropFirst()))
     case "icon": icon(Array(args.dropFirst()))
     default: print("unknown command"); exit(2)
     }

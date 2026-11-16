@@ -68,6 +68,8 @@ final class ImageStore {
     }
 
     func image(_ i: Int) -> CGImage? { i < slots.count ? slots[i].image : nil }
+    func failed(_ i: Int) -> Bool { i < slots.count && slots[i].state == .failed }
+    func alt(_ i: Int) -> String { i < specs.count ? specs[i].alt : "" }
 
     /// Display sizes of all images (snapshot for a parallel layout pass).
     func sizes(maxWidth: CGFloat) -> [CGSize] {

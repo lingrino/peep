@@ -58,8 +58,13 @@ public enum MarkdownParser {
                     if ctx.sawRule { b.kind = .rule } else { continue }   // comments-only block
                 }
             case .code:
-                gather(pb)
-                ctx.text.bytes.append(contentsOf: scratch)
+                // Straight into the rendered text (no scratch copy).
+                for k in 0..<Int(pb.lineCount) {
+                    let li = (Int(pb.lineStart) + k) * 2
+                    let s = Int(bp.lines[li]), e = Int(bp.lines[li + 1])
+                    if k > 0 { ctx.text.append(0x0A) }
+                    ctx.text.bytes.append(contentsOf: UnsafeBufferPointer(start: p + s, count: e - s))
+                }
                 if pb.info.1 > pb.info.0 {
                     let info = String(decoding: UnsafeBufferPointer(start: p + Int(pb.info.0), count: Int(pb.info.1 - pb.info.0)), as: UTF8.self)
                     let lang = info.split(whereSeparator: { $0 == " " || $0 == "{" || $0 == "," }).first.map(String.init) ?? ""

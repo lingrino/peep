@@ -63,6 +63,9 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
             view.layoutSubtreeIfNeeded()
         }
         preview.show(doc)
+        // Draw the first screen of tiles now, so the layers already hold content when Quick
+        // Look composites the remote view (saves a display cycle).
+        preview.displayIfNeeded()
         handler(nil)
         let ms = Double(nanotime() - t0) / 1e6
         log.notice("prepare \(url.lastPathComponent, privacy: .public): \(doc.timingSummary, privacy: .public) | total \(ms, format: .fixed(precision: 2))ms")

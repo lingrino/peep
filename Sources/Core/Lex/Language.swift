@@ -90,30 +90,35 @@ public enum Language: UInt8, CaseIterable, Sendable {
         return sniff(head) ?? .plain
     }
 
-    /// Code-fence info strings (```lang) and other free-form names.
+    /// Code-fence info strings (```lang) and other free-form names. One dictionary lookup.
     public static func named(_ s: String) -> Language? {
-        let lower = s.lowercased()
-        switch lower {
-        case "objective-c", "objectivec", "obj-c": return .objc
-        case "c++": return .cpp
-        case "c#", "cs": return .csharp
-        case "f#": return .fsharp
-        case "shell", "console", "shellsession", "terminal": return .shell
-        case "text", "txt", "plaintext", "plain", "output": return .plain
-        case "golang": return .go
-        case "javascript", "node": return .javascript
-        case "typescript": return .typescript
-        case "python3", "py3": return .python
-        case "docker": return .dockerfile
-        case "make": return .makefile
-        case "terraform", "tf": return .hcl
-        case "patch": return .diff
-        case "markdown", "md": return .markdown
-        case "postgres", "postgresql", "mysql", "sqlite", "plsql": return .sql
-        default: break
-        }
-        if let l = Language.allCases.first(where: { $0.name.lowercased() == lower }) { return l }
-        return byExtension(lower)
+        if s.isEmpty || s.utf8.count > 24 { return nil }
+        return nameMap[asciiLower(s)]
+    }
+
+    /// Lowercased language names, common aliases, and every file extension.
+    static let nameMap: [String: Language] = {
+        var m: [String: Language] = [:]
+        for (l, list) in extensionTable { for e in list.split(separator: " ") { m[String(e)] = l } }
+        for l in Language.allCases { m[asciiLower(l.name)] = l }
+        let aliases: [(String, Language)] = [
+            ("objective-c", .objc), ("objectivec", .objc), ("obj-c", .objc), ("c++", .cpp), ("c#", .csharp), ("cs", .csharp),
+            ("f#", .fsharp), ("shell", .shell), ("console", .shell), ("shellsession", .shell), ("terminal", .shell),
+            ("sh", .shell), ("zsh", .shell), ("bash", .shell), ("text", .plain), ("txt", .plain), ("plaintext", .plain),
+            ("plain", .plain), ("output", .plain), ("golang", .go), ("javascript", .javascript), ("node", .javascript),
+            ("typescript", .typescript), ("python3", .python), ("py3", .python), ("docker", .dockerfile),
+            ("make", .makefile), ("terraform", .hcl), ("tf", .hcl), ("patch", .diff), ("markdown", .markdown), ("md", .markdown),
+            ("postgres", .sql), ("postgresql", .sql), ("mysql", .sql), ("sqlite", .sql), ("plsql", .sql), ("jsonc", .json),
+            ("yml", .yaml), ("html", .html), ("xml", .xml), ("svg", .xml), ("plist", .xml), ("proto", .protobuf),
+        ]
+        for (k, v) in aliases { m[k] = v }
+        return m
+    }()
+
+    @inline(__always) static func asciiLower(_ s: String) -> String {
+        var u = Array(s.utf8)
+        for i in u.indices where u[i] >= 0x41 && u[i] <= 0x5A { u[i] |= 0x20 }
+        return String(decoding: u, as: UTF8.self)
     }
 
     static func byName(_ n: String) -> Language? {
