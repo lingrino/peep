@@ -201,7 +201,7 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   `return`/`new`), JS/TS class members and `const f = () =>`, column-0 rules (`CLikeSpec.lineStart`:
   Haskell/Elm signatures, Erlang clauses, labels, R), qualified names (`def self.x`, `fun T.x`).
   `CodeOutline` titles and levels them (Swift inits get argument labels; adjacent one-line clauses
-  merge). Sidebar for files of 60+ lines with 3+ symbols. Check with `peep-dev symbols [--all]`.
+  merge). Sidebar whenever there is an entry (any length) and the preview is 780+ pt wide. Check with `peep-dev symbols [--all]`.
 
 ## Benchmarks and the bar
 

@@ -35,7 +35,7 @@ public protocol DocumentContent: AnyObject {
     func anchorSpan(_ name: String) -> (top: CGFloat, height: CGFloat)?
     /// About to show `rect` (content space): finish any deferred layout it needs.
     func willShow(_ rect: CGRect)
-    /// Sidebar entries (Markdown headings, code declarations); fewer than 3 = no sidebar.
+    /// Sidebar entries (Markdown headings, code declarations); none = no sidebar.
     var outlineEntries: [OutlineEntry] { get }
     /// Top and height of entry `i` in content space (exact: may finish deferred layout).
     func outlineSpan(_ i: Int) -> (top: CGFloat, height: CGFloat)?

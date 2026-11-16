@@ -69,9 +69,8 @@ public final class CodeContent: DocumentContent {
         return s
     }
 
-    /// Only files long enough to navigate get a sidebar.
     public var outlineEntries: [OutlineEntry] {
-        lines.count < 60 ? [] : codeSymbols().map { OutlineEntry(level: $0.level, title: $0.title) }
+        codeSymbols().map { OutlineEntry(level: $0.level, title: $0.title) }
     }
 
     public func outlineSpan(_ i: Int) -> (top: CGFloat, height: CGFloat)? {

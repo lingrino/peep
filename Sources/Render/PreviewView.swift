@@ -103,10 +103,11 @@ public final class PreviewView: NSView {
         documentView.flash(top: span.top, height: span.height)
     }
 
-    /// Sidebar for Markdown headings and code declarations (3 or more entries).
+    /// Sidebar for Markdown headings and code declarations, whenever there is at least one
+    /// (whatever the document's length: the owner wants it always there).
     private func installOutline(_ c: DocumentContent) {
         let entries = c.outlineEntries
-        guard entries.count >= 3 else { return }
+        guard !entries.isEmpty else { return }
         let o = OutlineView(frame: NSRect(x: 0, y: 0, width: OutlineView.width, height: bounds.height))
         o.setEntries(entries)
         o.lateClickHandled = { [weak self] e in self?.lateMouseDown(e) ?? false }

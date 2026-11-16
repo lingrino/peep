@@ -1,8 +1,8 @@
 import AppKit
 
 /// Markdown table of contents shown as a sidebar (headings up to H3), with the section at
-/// the top of the viewport highlighted. Shown only when the document has enough headings
-/// and the preview is wide enough (see PreviewView).
+/// the top of the viewport highlighted. Shown whenever the document has an entry and the
+/// preview is wide enough (see PreviewView).
 @MainActor
 final class OutlineView: NSView {
     struct Item {
