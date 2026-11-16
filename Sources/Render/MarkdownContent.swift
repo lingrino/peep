@@ -85,14 +85,18 @@ public final class MarkdownContent: DocumentContent {
             results.append(r)
             k += 1
         }
+        layoutEnv = env
         if k == n {
             pending = nil
+            exactCount = n
             stack(results, x0: x0)
             lastLayoutNanos = nanotime() - t0
             renderLog.debug("md layout w=\(self.width) all \(n) blocks \(Double(self.lastLayoutNanos) / 1e6)ms")
             return
         }
         for i in k..<n { results.append(MarkdownLayout.estimate(i, env)) }
+        layouts = results
+        exactCount = k
         stack(results, x0: x0)
         lastLayoutNanos = nanotime() - t0
         renderLog.debug("md layout w=\(self.width) sync \(k)/\(n) blocks \(Double(self.lastLayoutNanos) / 1e6)ms")
@@ -101,7 +105,7 @@ public final class MarkdownContent: DocumentContent {
         // thread turn, i.e. after the first frame is drawn. The layout threads hold Core
         // Text's per-font shaping lock most of the time; a first draw competing with them took
         // 21ms instead of ~3ms (900 KB changelog).
-        let job = PendingLayout(first: k, count: n - k, x0: x0, prefix: results[0..<k], env: env)
+        let job = PendingLayout(first: k, count: n - k, x0: x0, env: env)
         pending = job
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.start(job) } }
     }
@@ -110,13 +114,19 @@ public final class MarkdownContent: DocumentContent {
         guard pending === job, !job.started else { return }
         job.started = true
         let gen = generation
+        let t0 = nanotime()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             job.run()
+            let ran = nanotime() - t0
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.generation == gen, self.pending === job else { return }
+                    let t1 = nanotime()
                     self.adopt(job)
+                    let t2 = nanotime()
                     self.onLayoutChanged?()
+                    self.lastBackground = (ran, t2 - t1, nanotime() - t2)
+                    renderLog.debug("md background layout: \(job.count) blocks in \(Double(ran) / 1e6)ms; main thread: adopt \(Double(t2 - t1) / 1e6)ms, update \(Double(nanotime() - t2) / 1e6)ms")
                 }
             }
         }
@@ -130,13 +140,38 @@ public final class MarkdownContent: DocumentContent {
 
     private var generation = 0
     private var pending: PendingLayout?
+    var isLayoutPending: Bool { pending != nil }
+    /// Last background layout: (threads, adopt on main, update on main) in ns.
+    private(set) var lastBackground: (UInt64, UInt64, UInt64) = (0, 0, 0)
 
     /// Called after background layout lands (resize + repaint, no relayout).
     public var onLayoutChanged: (() -> Void)?
 
+    /// Current per-block layouts while background layout is pending: exact for the first
+    /// `exactCount` blocks, estimates after. The env lays out more blocks on demand.
+    private var layouts: [BlockLayout] = []
+    private var exactCount = 0
+    private var layoutEnv: LayoutEnv?
+
+    /// The visible rect reached estimated geometry: lay out just enough more blocks (in order,
+    /// on this thread) to cover it, instead of waiting for the whole background job. Waiting
+    /// stalled Quick Look's panel 0.5-2.5 s on a 10 MB document when it opened taller than
+    /// the preview was prepared at. The job keeps running; its results replace these.
     public func willShow(_ rect: CGRect) {
-        guard let job = pending, job.first < blocks.count else { return }
-        if rect.maxY > blocks[job.first].y { finishLayout() }
+        guard pending != nil, exactCount < blocks.count, rect.maxY > blocks[exactCount].y,
+              let env = layoutEnv else { return }
+        let target = rect.maxY + 160
+        var y = blocks[exactCount].y   // exact: everything above it is laid out
+        var k = exactCount
+        while k < layouts.count && y < target {
+            let r = MarkdownLayout.block(k, env)
+            layouts[k] = r
+            y += r.height + m.gap
+            k += 1
+        }
+        exactCount = k
+        stack(layouts, x0: env.x0)
+        onLayoutChanged?()
     }
 
     /// Blocks until background layout is done and adopts it (exact geometry everywhere).
@@ -150,8 +185,10 @@ public final class MarkdownContent: DocumentContent {
     private func adopt(_ job: PendingLayout) {
         guard pending === job else { return }
         pending = nil
-        var all = Array(job.prefix)
+        var all = Array(layouts[0..<job.first])
         all.append(contentsOf: job.results)
+        layouts = []
+        exactCount = all.count
         stack(all, x0: job.x0)
     }
 

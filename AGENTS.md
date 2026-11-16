@@ -74,7 +74,8 @@ Scripts/dev.sh render <file> out.png [--dark] [--size WxH] [--scroll Y] [--selec
 Scripts/dev.sh bench <files...>       # pipeline stage timings (best of N)
 Scripts/dev.sh lexbench <file> [N]    # lexer-only throughput
 Scripts/dev.sh layout <file.md> [w]   # markdown block/box dump (+ geometry self-check)
-Scripts/dev.sh firstpaint <files...>  # main-thread cost to first frame: open/show/layout/draw
+Scripts/dev.sh firstpaint <files...>  # main-thread cost to first frame: open/show/layout/draw (+ markdown background layout)
+Scripts/dev.sh showcost <files...>    # on-screen show + CA commit, and growing the view during background layout
 Scripts/dev.sh smoke <dirs/files...>  # open+draw+scroll+find every file; crashes, geometry, slowest
 Scripts/dev.sh parsebench <file.md|dir> [N]   # markdown parse throughput (dir: MB/s by file size, slowest files)
 Scripts/dev.sh mddump <outdir> <files/dirs...>  # full dump per parsed .md: diff -r old/new dumps around parser changes
@@ -132,8 +133,11 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   - Anything that re-stacks must place boxes *absolutely* (`TextBox.place(top:)`); relative
     translation drew the prefix at 2× its y once background layout landed (this shipped).
   - Exact geometry below the prefix needs `finishLayout()` (anchors, find reveal, outline
-    clicks); `willShow` calls it when the *visible* rect reaches an estimated region. Never
-    pass the tile margin to `willShow`: that silently made first paint lay out everything.
+    clicks). When the *visible* rect reaches an estimated region, `willShow` lays out just the
+    next blocks in order on the main thread (extending the exact prefix); it used to call
+    `finishLayout()`, which stalled Quick Look's panel 0.5–2.5 s on a 10 MB document whenever
+    it opened taller than the preview was prepared at (`peep-dev showcost`, `render --early`).
+    Never pass the tile margin to `willShow`: that silently made first paint lay out everything.
   - The background job starts *after* the first frame: its threads hold Core Text's per-font
     shaping lock, and a first draw competing with them was 5× slower.
 - First-paint budget is measured with `peep-dev firstpaint`, not guessed. `NSVisualEffectView`

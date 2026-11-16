@@ -105,18 +105,16 @@ final class PendingLayout: @unchecked Sendable {
     let first: Int
     let count: Int
     let x0: CGFloat
-    let prefix: ArraySlice<BlockLayout>
     let env: LayoutEnv
     private(set) var results: [BlockLayout] = []
     private let done = DispatchGroup()
     /// Whether `run` has been called or scheduled (main thread only).
     var started = false
 
-    init(first: Int, count: Int, x0: CGFloat, prefix: ArraySlice<BlockLayout>, env: LayoutEnv) {
+    init(first: Int, count: Int, x0: CGFloat, env: LayoutEnv) {
         self.first = first
         self.count = count
         self.x0 = x0
-        self.prefix = prefix
         self.env = env
         done.enter()
     }

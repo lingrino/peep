@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 // peep-dev: developer tool (not shipped). Renders files through the real view stack to PNG
 // and benchmarks the pipeline.
 //
-//   peep-dev render <file> <out.png> [--dark] [--size 900x700] [--scroll 0] [--select a:b] [--find text]
+//   peep-dev render <file> <out.png> [--dark] [--size 900x700] [--scroll 0] [--select a:b] [--find text] [--early]
 //   peep-dev bench <file>... [--iterations N]
 //   peep-dev tokens <file>
 
@@ -18,6 +18,7 @@ func render(_ args: [String]) {
     var select: (Int, Int)?
     var find: String?
     var wait = 0.0
+    var early = false   // don't finish background layout first: draw what scrolling alone produces
     var i = 2
     while i < args.count {
         switch args[i] {
@@ -33,6 +34,7 @@ func render(_ args: [String]) {
             select = (p[0], p[1])
         case "--find": i += 1; find = args[i]
         case "--wait": i += 1; wait = Double(args[i]) ?? 0
+        case "--early": early = true
         default: print("unknown option \(args[i])"); exit(2)
         }
         i += 1
@@ -44,7 +46,7 @@ func render(_ args: [String]) {
     let t0 = nanotime()
     let doc = Document.open(path: path)
     view.show(doc)
-    (doc.content as? MarkdownContent)?.finishLayout()
+    if !early { (doc.content as? MarkdownContent)?.finishLayout() }
     view.layoutSubtreeIfNeeded()
     if wait > 0 { RunLoop.main.run(until: Date(timeIntervalSinceNow: wait)); view.layoutSubtreeIfNeeded() }
     if scrollY > 0 { view.documentView.scrollToTop(y: scrollY) }
@@ -510,6 +512,18 @@ func firstPaint(_ args: [String]) {
         }
         let ms = best.map { String(format: "%.2f", Double($0) / 1e6) }
         print("\((f as NSString).lastPathComponent): open \(ms[0]) show \(ms[1]) layout \(ms[2]) draw \(ms[3]) ms")
+        // Markdown: what happens after the first frame (background layout lands on main).
+        let doc = Document.open(path: f)
+        view.show(doc)
+        view.layoutSubtreeIfNeeded()
+        view.cacheDisplay(in: view.bounds, to: rep)
+        if let md = doc.content as? MarkdownContent, md.isLayoutPending {
+            let t0 = nanotime()
+            while md.isLayoutPending { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001)) }
+            let b = md.lastBackground
+            print(String(format: "  settled after %.1f ms: background %.1f ms; main thread adopt %.2f ms + update %.2f ms",
+                         Double(nanotime() - t0) / 1e6, Double(b.0) / 1e6, Double(b.1) / 1e6, Double(b.2) / 1e6))
+        }
     }
 }
 
@@ -541,6 +555,50 @@ func findBench(_ args: [String]) {
         }
         print(String(format: "  %-12@ %8d matches  search %7.2fms (%5.1f GB/s)  full %7.2fms", "\"\(q)\"" as NSString, n,
                      Double(raw) / 1e6, Double(text.count) / Double(raw), Double(full) / 1e6))
+    }
+}
+
+/// What showing a preview costs in a real on-screen window: open, show, layout, display, and
+/// the Core Animation commit (what Quick Look's panel waits for before it appears).
+@MainActor
+func showCost(_ args: [String]) {
+    let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: 980, height: 800),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    let view = PreviewView(frame: NSRect(x: 0, y: 0, width: 980, height: 800))
+    window.contentView = view
+    window.orderFrontRegardless()
+    for f in args {
+        var best = [UInt64](repeating: .max, count: 5)
+        for _ in 0..<5 {
+            var t = nanotime()
+            var lap = [UInt64]()
+            func mark() { let n = nanotime(); lap.append(n - t); t = n }
+            let doc = Document.open(path: f); mark()
+            view.show(doc); mark()
+            view.layoutSubtreeIfNeeded(); mark()
+            window.displayIfNeeded(); mark()
+            CATransaction.flush(); mark()
+            for i in 0..<5 { best[i] = min(best[i], lap[i]) }
+            (doc.content as? MarkdownContent)?.finishLayout()
+        }
+        let ms = best.map { String(format: "%.2f", Double($0) / 1e6) }
+        print("\((f as NSString).lastPathComponent): open \(ms[0]) show \(ms[1]) layout \(ms[2]) display \(ms[3]) commit \(ms[4]) ms; outline \(view.outline?.items.count ?? 0) rows")
+        // Quick Look resizes the view as its panel opens, while background layout runs.
+        let doc = Document.open(path: f)
+        // Prepared at a smaller size than the panel opens at (taller: past the synchronous prefix).
+        window.setContentSize(NSSize(width: 980, height: 500))
+        view.frame = NSRect(x: 0, y: 0, width: 980, height: 500)
+        view.show(doc)
+        view.layoutSubtreeIfNeeded(); window.displayIfNeeded(); CATransaction.flush()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))   // background layout is running now
+        let t0 = nanotime()
+        window.setContentSize(NSSize(width: 1040, height: 840))
+        view.frame = NSRect(x: 0, y: 0, width: 1040, height: 840)
+        view.layoutSubtreeIfNeeded(); window.displayIfNeeded(); CATransaction.flush()
+        print(String(format: "  grow 500 -> 840 pt tall during background layout: %.2f ms", Double(nanotime() - t0) / 1e6))
+        (doc.content as? MarkdownContent)?.finishLayout()
+        window.setContentSize(NSSize(width: 980, height: 800))
+        view.frame = NSRect(x: 0, y: 0, width: 980, height: 800)
     }
 }
 
@@ -690,6 +748,7 @@ MainActor.assumeIsolated {
     case "types": types(Array(args.dropFirst()))
     case "smoke": smoke(Array(args.dropFirst()))
     case "firstpaint": firstPaint(Array(args.dropFirst()))
+    case "showcost": showCost(Array(args.dropFirst()))
     case "findbench": findBench(Array(args.dropFirst()))
     case "jumpbench": jumpBench(Array(args.dropFirst()))
     case "tilecheck": tileCheck(Array(args.dropFirst()))
