@@ -544,6 +544,55 @@ func findBench(_ args: [String]) {
     }
 }
 
+/// Tile coverage under outline jumps, overscroll past either end (what elastic scrolling
+/// does) and resizes: after every step the visible rect must be covered by placed tiles.
+@MainActor
+func tileCheck(_ args: [String]) {
+    let window = NSWindow(contentRect: NSRect(x: -4000, y: 0, width: 990, height: 800),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    let view = PreviewView(frame: NSRect(x: 0, y: 0, width: 990, height: 800))
+    window.contentView = view
+    window.orderFrontRegardless()
+    var rng = SystemRandomNumberGenerator()
+    for f in args {
+        let doc = Document.open(path: f)
+        view.show(doc)
+        view.layoutSubtreeIfNeeded()
+        let n = doc.content.outlineEntries.count
+        let clip = view.scrollView.contentView
+        var gaps = 0, steps = 0
+        func check(_ what: String) {
+            steps += 1
+            if let g = view.documentView.tileCoverageGap() {
+                gaps += 1
+                if gaps <= 5 { print("  gap at tile row \(g.row) col \(g.col) after \(what) (visible y \(Int(clip.bounds.minY)))") }
+            }
+        }
+        for _ in 0..<400 {
+            let maxY = max(0, view.documentView.bounds.height - clip.bounds.height)
+            switch Int.random(in: 0..<5, using: &rng) {
+            case 0 where n > 0:
+                let i = Int.random(in: 0..<n, using: &rng)
+                view.jumpToOutline(i); check("jump to entry \(i)")
+            case 1:   // overscroll past the end, then settle (the rubber band)
+                clip.setBoundsOrigin(NSPoint(x: 0, y: maxY + CGFloat.random(in: 20...300, using: &rng))); check("overscroll at end")
+                clip.setBoundsOrigin(NSPoint(x: 0, y: maxY)); check("settle at end")
+            case 2:   // overscroll before the top
+                clip.setBoundsOrigin(NSPoint(x: 0, y: -CGFloat.random(in: 20...300, using: &rng))); check("overscroll at top")
+                clip.setBoundsOrigin(NSPoint(x: 0, y: 0)); check("settle at top")
+            case 3:
+                clip.setBoundsOrigin(NSPoint(x: 0, y: CGFloat.random(in: 0...max(1, maxY), using: &rng))); check("scroll")
+            default:
+                let h = CGFloat.random(in: 400...1100, using: &rng)
+                window.setContentSize(NSSize(width: 990, height: h))
+                view.frame = NSRect(x: 0, y: 0, width: 990, height: h)
+                view.layoutSubtreeIfNeeded(); check("resize to \(Int(h))")
+            }
+        }
+        print("\((f as NSString).lastPathComponent): \(steps) steps, \(gaps) with uncovered tiles")
+    }
+}
+
 /// Table-of-contents clicks: jump to each heading and draw what becomes visible. Prints the
 /// worst and median click cost (scroll + tile draws) and tiles drawn per click.
 @MainActor
@@ -643,6 +692,7 @@ MainActor.assumeIsolated {
     case "firstpaint": firstPaint(Array(args.dropFirst()))
     case "findbench": findBench(Array(args.dropFirst()))
     case "jumpbench": jumpBench(Array(args.dropFirst()))
+    case "tilecheck": tileCheck(Array(args.dropFirst()))
     case "symbols": symbolsDump(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
     case "parsebench": parsebench(Array(args.dropFirst()))

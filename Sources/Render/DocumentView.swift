@@ -270,11 +270,31 @@ public final class DocumentView: NSView {
                     return false
                 }
             }
-            for t in free.prefix(8) { t.frame = .zero }
+            // Parked tiles forget their slot too: one keeping its row/col counted as already
+            // placed when that slot was needed again, leaving it blank (zero frame). Elastic
+            // overscroll shrinks the wanted rect and parks tiles; a jump back hit this.
+            for t in free.prefix(8) { t.frame = .zero; t.row = -1; t.col = -1 }
         }
         place(&tiles, gutter: false, cols: c0...c1, parent: self)
         if gw > 0 { place(&gutterTiles, gutter: true, cols: 0...0, parent: gutterView) }
         lastTiledRect = want
+    }
+
+    /// First visible tile slot (row, col) without a placed tile, if any: the visible rect must
+    /// always be covered (`peep-dev tilecheck`).
+    func tileCoverageGap() -> (row: Int, col: Int)? {
+        guard let sv = scrollView else { return nil }
+        let vis = sv.contentView.bounds.intersection(bounds)
+        if vis.isNull || vis.isEmpty { return nil }
+        let ts = DocumentView.tileSize
+        for r in Int(vis.minY / ts)...Int((vis.maxY - 0.5) / ts) {
+            for c in Int(vis.minX / ts)...Int((vis.maxX - 0.5) / ts) {
+                let ok = tiles.contains { $0.row == r && $0.col == c && !$0.frame.isEmpty
+                    && $0.frame.minY == CGFloat(r) * ts && $0.frame.minX == CGFloat(c) * ts }
+                if !ok { return (r, c) }
+            }
+        }
+        return nil
     }
 
     func invalidateAll() {

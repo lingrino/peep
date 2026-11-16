@@ -80,6 +80,7 @@ Scripts/dev.sh parsebench <file.md|dir> [N]   # markdown parse throughput (dir: 
 Scripts/dev.sh mddump <outdir> <files/dirs...>  # full dump per parsed .md: diff -r old/new dumps around parser changes
 Scripts/dev.sh findbench <file> <query...>  # raw search vs full find path per query
 Scripts/dev.sh jumpbench <files...>        # outline jump cost (scroll + tile draws), flashes, highlighted row
+Scripts/dev.sh tilecheck <files...>        # random jumps/overscroll/resizes; visible rect always covered by tiles
 Scripts/dev.sh symbols <files...>          # code outline entries as the sidebar shows them
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
@@ -117,7 +118,9 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   8%. New behavior goes in rare branches, behind a local gate (`anyDialect`, `hint != 0`), reading
   options from `s` there; state that would be one more variable is recomputed by looking back
   (`expressionKeywordBefore`). Compare with `bench.sh`-style alternating runs of the old binary.
-- Rendering: tiles (512 pt, layer-backed, opaque) draw once; scrolling moves layers. ASCII code
+- Rendering: tiles (512 pt, layer-backed, opaque) draw once; scrolling moves layers. A tile is
+  "placed" by its row/col: parked (recycled) tiles must reset them, or a slot looks covered
+  while its tile has a zero frame (blank bands after elastic overscroll + jumps; `tilecheck`). ASCII code
   lines draw via a glyph table + `CTFontDrawGlyphs` (positions are in *text space*: negate y
   because the text matrix flips). Non-ASCII lines use `CTLine`.
 - In the flipped context, Core Text baseline offsets are inverted (superscript = negative).
