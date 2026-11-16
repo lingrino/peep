@@ -69,7 +69,10 @@ Scripts/test.sh [filter]     # debug build of Core + Tests, run   (CONFIG=releas
 Scripts/dev.sh render <file> out.png [--dark] [--size WxH] [--scroll Y] [--select a:b] [--find q] [--wait s]
 Scripts/dev.sh bench <files...>       # pipeline stage timings (best of N)
 Scripts/dev.sh lexbench <file> [N]    # lexer-only throughput
-Scripts/dev.sh layout <file.md> [w]   # markdown block/box dump
+Scripts/dev.sh layout <file.md> [w]   # markdown block/box dump (+ geometry self-check)
+Scripts/dev.sh firstpaint <files...>  # main-thread cost to first frame: open/show/layout/draw
+Scripts/dev.sh smoke <dirs/files...>  # open+draw+scroll+find every file; crashes, geometry, slowest
+Scripts/dev.sh parsebench <file.md> [N]   # markdown parse throughput
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
@@ -103,6 +106,26 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   lines draw via a glyph table + `CTFontDrawGlyphs` (positions are in *text space*: negate y
   because the text matrix flips). Non-ASCII lines use `CTLine`.
 - In the flipped context, Core Text baseline offsets are inverted (superscript = negative).
+- `CTLineDraw` advances `ctx.textPosition`; reset it after, or the next glyph-table line draws
+  offset.
+- Markdown layout is progressive: blocks are laid out synchronously until ~2400 pt exist, the
+  rest get estimated heights and are laid out in parallel in the background, then the whole
+  list is re-stacked. Consequences:
+  - Anything that re-stacks must place boxes *absolutely* (`TextBox.place(top:)`); relative
+    translation drew the prefix at 2× its y once background layout landed (this shipped).
+  - Exact geometry below the prefix needs `finishLayout()` (anchors, find reveal, outline
+    clicks); `willShow` calls it when an estimated region is about to be drawn.
+  - The background job starts *after* the first frame: its threads hold Core Text's per-font
+    shaping lock, and a first draw competing with them was 5× slower.
+- First-paint budget is measured with `peep-dev firstpaint`, not guessed. `NSVisualEffectView`
+  cost ~14 ms there (CPU compositing in `renderInContext`); use plain colors unless something
+  is actually behind the view.
+- Core Text applies a paragraph style's extra line height above the first line too; `TextBox`
+  shifts it away so a box starts at its first line's top.
+- Markdown parse hot spots were never the obvious ones: per-paragraph scratch copies (reference
+  definitions), header-cell splitting on every second line (tables), `Character`-level Unicode
+  checks (slugs), `String.contains` (titles), `Language.named` lowercasing per code fence.
+  Prefilter on bytes before doing real work.
 
 ## Quick Look facts (verified on macOS 27)
 
@@ -116,6 +139,13 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 - Killing the extension while a panel shows it (every install does) leaves that panel in a
   "failed during preview" state; close it and move the selection to recover. Not a bug.
 - Remote view frames reported to the extension are synthetic; only sizes are meaningful.
+- Cursor: only cursor *rects* reach the screen (`NSCursor.set()` is dropped). The rect's cursor
+  applies when the mouse enters it; a panel opening under a still mouse shows the arrow until
+  it crosses a rect edge. Overlapping rects show the arrow, and moving between adjacent rects
+  with different cursors often leaves the arrow (exit/enter arrive in no fixed order). So:
+  one I-beam rect over the visible area, refreshed when the visible rect changes (the remote
+  window doesn't re-ask after sizing); no pointing hand over links. To measure, sample
+  `NSCursor.currentSystem` from a separate process while moving the mouse.
 
 ## Signing, permissions, agent
 
@@ -133,6 +163,8 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 
 - Logs: `log stream --style compact --predicate 'subsystem == "com.lingrino.peep"'`
   (use `/usr/bin/log` from zsh). Crash reports: `~/Library/Logs/DiagnosticReports/Peep*.ips`.
+- Debug-level lines (`--level debug`) include each preview's first paint ("first paint: N
+  tiles drawn in X ms, Y ms after setContent") and markdown layout timings.
 - Agent state: `launchctl print gui/$(id -u)/com.lingrino.peep.agent`.
 - Extension registration: `pluginkit -m -v -i com.lingrino.peep.preview` (`+` = enabled).
 - Another QL extension claiming the same types (e.g. Peek) can win; disable it with
