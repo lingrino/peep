@@ -152,6 +152,11 @@ func types(_ args: [String]) {
             add(dynamicUTI(e))
         }
     }
+    // Wrapper suffixes (config.yml.dist, Makefile.in): one type each, whatever they wrap.
+    for e in Language.wrapperExtensions.sorted() {
+        if let t = UTType(filenameExtension: e), !t.isDynamic, !exclude.contains(t.identifier) { add(t.identifier) }
+        add(dynamicUTI(e))
+    }
     // Extensionless files (Makefile, Dockerfile, .gitignore, scripts) and broad families.
     for t in ["public.data", "public.unix-executable", "public.plain-text", "public.text", "public.source-code",
               "public.script", "public.shell-script", "public.make-source", "public.json", "public.yaml", "public.xml",

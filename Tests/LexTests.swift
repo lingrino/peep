@@ -117,6 +117,11 @@ let lexTests: [Test] = [
         expectEqual(d(".zshrc"), .shell); expectEqual(d("x.TSX"), .typescript); expectEqual(d("run", "#!/usr/bin/env python3\n"), .python)
         expectEqual(d("Gemfile"), .ruby); expectEqual(d(".env.local"), .dotenv); expectEqual(d("a.unknown"), .plain)
         expectEqual(Language.named("c++"), .cpp); expectEqual(Language.named("Swift"), .swift); expectEqual(Language.named("sh"), .shell)
+        // Wrapper suffixes are looked through; template suffixes only when the inner name is known.
+        expectEqual(d("config.yml.dist"), .yaml); expectEqual(d("Makefile.in"), .makefile); expectEqual(d("config.h.in"), .c)
+        expectEqual(d(".env.example"), .dotenv); expectEqual(d("app.json.sample.bak"), .json); expectEqual(d("notes.bak"), .plain)
+        expectEqual(d("nginx.conf.j2"), .ini); expectEqual(d("page.j2"), .html); expectEqual(d("config.yml.erb"), .yaml)
+        expectEqual(d("Package.resolved"), .json); expectEqual(d("x.xcscheme"), .xml); expectEqual(d("x.mkdown"), .markdown)
         // Byte lookup agrees with the String lookup for every name, in any case.
         func bytes(_ s: String) -> Language? { Array(s.utf8).withUnsafeBufferPointer { Language.named($0.baseAddress!, $0.count) } }
         for name in Language.nameMap.keys {

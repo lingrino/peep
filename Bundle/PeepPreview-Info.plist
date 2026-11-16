@@ -46,6 +46,12 @@
 				<string>dyn.ah62d4rv4ge80u</string>
 				<string>public.c-source.preprocessed</string>
 				<string>dyn.ah62d4rv4ge80w</string>
+				<string>com.apple.xcode.strings-text</string>
+				<string>dyn.ah62d4rv4ge81g7dwrf1gs62</string>
+				<string>public.module-map</string>
+				<string>dyn.ah62d4rv4ge80455esz0gn5pbsa</string>
+				<string>com.apple.xcode.projectdata</string>
+				<string>dyn.ah62d4rv4ge81a2x2sb3g84u</string>
 				<string>public.c-plus-plus-source</string>
 				<string>dyn.ah62d4rv4ge80g22</string>
 				<string>dyn.ah62d4rv4ge80g6du</string>
@@ -75,6 +81,7 @@
 				<string>com.sun.java-source</string>
 				<string>dyn.ah62d4rv4ge80y2p0qe</string>
 				<string>dyn.ah62d4rv4ge80y2p0</string>
+				<string>dyn.ah62d4rv4ge81a3df</string>
 				<string>dyn.ah62d4rv4ge8007a</string>
 				<string>dyn.ah62d4rv4ge8007dx</string>
 				<string>dyn.ah62d4rv4ge8007dr</string>
@@ -104,6 +111,7 @@
 				<string>dyn.ah62d4rv4ge80y65r</string>
 				<string>dyn.ah62d4rv4ge80s62</string>
 				<string>dyn.ah62d4rv4ge80y65dqfwa</string>
+				<string>dyn.ah62d4rv4ge81e4xx</string>
 				<string>public.mpeg-2-transport-stream</string>
 				<string>dyn.ah62d4rv4ge81k62</string>
 				<string>public.avchd-mpeg-2-transport-stream</string>
@@ -236,6 +244,7 @@
 				<string>dyn.ah62d4rv4ge8064pr</string>
 				<string>dyn.ah62d4rv4ge8064prsq</string>
 				<string>dyn.ah62d4rv4ge8064prqm0gn</string>
+				<string>dyn.ah62d4rv4ge8064prsm10k</string>
 				<string>dyn.ah62d4rv4ge80g6u</string>
 				<string>dyn.ah62d4rv4ge81a63v</string>
 				<string>dyn.ah62d4rv4ge81a65rge</string>
@@ -302,6 +311,9 @@
 				<string>dyn.ah62d4rv4ge80g55eqy01s55wrr31a2pdqy</string>
 				<string>dyn.ah62d4rv4ge81g7pcrvy043mrsrw1k7dmr3x1g</string>
 				<string>dyn.ah62d4rv4ge81g7pcrvy043mrsb3g84xfqr4a</string>
+				<string>dyn.ah62d4rv4ge81e3pxr70hq3pe</string>
+				<string>com.runningwithcrayons.alfred.appearance</string>
+				<string>dyn.ah62d4rv4ge80c5dgsmw0k2pusbw0c6xbr3v0n</string>
 				<string>public.yaml</string>
 				<string>dyn.ah62d4rv4ge81w2prru</string>
 				<string>dyn.ah62d4rv4ge81w5pq</string>
@@ -382,6 +394,17 @@
 				<string>dyn.ah62d4rv4ge81k5pqqf1gs7pbq7wu</string>
 				<string>dyn.ah62d4rv4ge8086drru</string>
 				<string>dyn.ah62d4rv4ge8042psrfxgn65y</string>
+				<string>com.apple.dt.document.scheme</string>
+				<string>dyn.ah62d4rv4ge81u25xqrygn5pf</string>
+				<string>com.apple.xcode.strings-dictionary</string>
+				<string>dyn.ah62d4rv4ge81g7dwrf1gs65erfv1k</string>
+				<string>dyn.ah62d4rv4ge81u5pu</string>
+				<string>dyn.ah62d4rv4ge81u7pq</string>
+				<string>dyn.ah62d4rv4ge81e3dg</string>
+				<string>dyn.ah62d4rv4ge81g6dg</string>
+				<string>dyn.ah62d4rv4ge81g6dyrbw043k</string>
+				<string>dyn.ah62d4rv4ge80n25tsmwu</string>
+				<string>dyn.ah62d4rv4ge81s65g</string>
 				<string>public.html</string>
 				<string>dyn.ah62d4rv4ge80u7drru</string>
 				<string>dyn.ah62d4rv4ge80u7dr</string>
@@ -411,6 +434,7 @@
 				<string>dyn.ah62d4rv4ge81e2p4r73a</string>
 				<string>dyn.ah62d4rv4ge81k5puru</string>
 				<string>dyn.ah62d4rv4ge80s55ksv002</string>
+				<string>dyn.ah62d4rv4ge81e4dyrz0a</string>
 				<string>public.css</string>
 				<string>dyn.ah62d4rv4ge80g65x</string>
 				<string>dyn.ah62d4rv4ge81a25xsq</string>
@@ -460,6 +484,7 @@
 				<string>dyn.ah62d4rv4ge8043dts71a</string>
 				<string>dyn.ah62d4rv4ge80445e</string>
 				<string>dyn.ah62d4rv4ge80445er2</string>
+				<string>dyn.ah62d4rv4ge80445er7506</string>
 				<string>dyn.ah62d4rv4ge8043d1r2</string>
 				<string>dyn.ah62d4rv4ge8043dytb4a</string>
 				<string>dyn.ah62d4rv4ge8043dyqz6hk</string>
@@ -469,6 +494,19 @@
 				<string>dyn.ah62d4rv4ge8024p0qz00k</string>
 				<string>dyn.ah62d4rv4ge80g5pbrrwu</string>
 				<string>dyn.ah62d4rv4ge80255drq</string>
+				<string>dyn.ah62d4rv4ge80e2pdrr41a</string>
+				<string>dyn.ah62d4rv4ge80e2pp</string>
+				<string>dyn.ah62d4rv4ge80k3pgqf4027a</string>
+				<string>dyn.ah62d4rv4ge80k4pxqfvg23pe</string>
+				<string>dyn.ah62d4rv4ge80k4pxsu</string>
+				<string>dyn.ah62d4rv4ge80n8dbrz2g23k</string>
+				<string>dyn.ah62d4rv4ge80w5u</string>
+				<string>dyn.ah62d4rv4ge8063p1</string>
+				<string>dyn.ah62d4rv4ge8085de</string>
+				<string>dyn.ah62d4rv4ge8086xmq6</string>
+				<string>dyn.ah62d4rv4ge81g2prsb0gn</string>
+				<string>com.apple.iwork.pages.sfftemplate</string>
+				<string>dyn.ah62d4rv4ge81k3prsb0gc7df</string>
 				<string>public.data</string>
 				<string>public.unix-executable</string>
 				<string>public.plain-text</string>
@@ -504,7 +542,6 @@
 				<string>com.rstudio.rmarkdown</string>
 				<string>public.comma-separated-values-text</string>
 				<string>public.tab-separated-values-text</string>
-				<string>com.apple.xcode.strings-text</string>
 				<string>com.apple.xcode.configsettings</string>
 				<string>org.videolan.mod</string>
 				<string>com.apple.applescript.text</string>

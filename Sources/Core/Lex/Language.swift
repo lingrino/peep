@@ -83,6 +83,12 @@ public enum Language: UInt8, CaseIterable, Sendable {
         if let l = byName(lower) { return l }
         if let dot = lower.lastIndex(of: "."), dot != lower.startIndex {
             let ext = String(lower[lower.index(after: dot)...])
+            // "config.yml.dist", "Makefile.in", "nginx.conf.j2": highlight what is wrapped.
+            // One set lookup for every name; the inner detect only runs for wrapped names.
+            if wrapperExtensions.contains(ext) || templateWrappers.contains(ext) {
+                let inner = detect(fileName: String(lower[..<dot]), head: head)
+                if inner != .plain || wrapperExtensions.contains(ext) { return inner }
+            }
             if let l = byExtension(ext) { return l }
         } else if lower.hasPrefix("."), let l = byExtension(String(lower.dropFirst())) {
             return l   // dotfiles named like an extension: .bashrc -> "bashrc"
@@ -223,11 +229,11 @@ public enum Language: UInt8, CaseIterable, Sendable {
     /// detection *and* for the Quick Look content types Peep claims (Scripts/gen-types.sh).
     public static let extensionTable: [(Language, String)] = [
         (.swift, "swift swiftinterface"),
-        (.c, "c h i"),
+        (.c, "c h i strings modulemap pbxproj"),
         (.cpp, "cc cpp cxx c++ hh hpp hxx h++ ipp tpp inl ixx cppm ino cu cuh"),
         (.objc, "m mm"),
         (.csharp, "cs csx cake"),
-        (.java, "java jav"),
+        (.java, "java jav pde"),
         (.kotlin, "kt kts ktm"),
         (.scala, "scala sc sbt mill"),
         (.groovy, "groovy gvy gy gsh gradle"),
@@ -235,7 +241,7 @@ public enum Language: UInt8, CaseIterable, Sendable {
         (.go, "go"),
         (.rust, "rs ron"),
         (.zig, "zig zon"),
-        (.javascript, "js mjs cjs jsx es6 es jsm gs jscad"),
+        (.javascript, "js mjs cjs jsx es6 es jsm gs jscad rjs"),
         (.typescript, "ts mts cts tsx"),
         (.python, "py pyw pyi pyx pxd gyp gypi bzl star sconstruct sconscript wsgi rpy"),
         (.ruby, "rb rbw rake gemspec podspec ru jbuilder rabl thor irbrc pryrc builder"),
@@ -258,7 +264,7 @@ public enum Language: UInt8, CaseIterable, Sendable {
         (.glsl, "glsl vert frag geom comp tesc tese vsh fsh metal hlsl fx wgsl shader cginc"),
         (.solidity, "sol"),
         (.d, "d di"),
-        (.nim, "nim nims nimble"),
+        (.nim, "nim nims nimble nimrod"),
         (.crystal, "cr"),
         (.powershell, "ps1 psm1 psd1"),
         (.vim, "vim vimrc"),
@@ -266,13 +272,13 @@ public enum Language: UInt8, CaseIterable, Sendable {
         (.lisp, "lisp lsp cl el elc clj cljs cljc edn scm ss rkt fnl hy"),
         (.pascal, "pas pp dpr lpr dfm"),
         (.fortran, "f for f77 f90 f95 f03 f08"),
-        (.json, "json jsonc json5 jsonl ndjson geojson webmanifest har ipynb jsonld avsc tsbuildinfo code-workspace sublime-settings sublime-project"),
+        (.json, "json jsonc json5 jsonl ndjson geojson webmanifest har ipynb jsonld avsc tsbuildinfo code-workspace sublime-settings sublime-project resolved alfredappearance"),
         (.yaml, "yaml yml clang-format"),
         (.toml, "toml"),
         (.ini, "ini cfg conf config cnf properties prefs reg desktop service socket timer mount target inf lnk url gitconfig editorconfig npmrc pylintrc"),
         (.dotenv, "env envrc gitignore gitattributes dockerignore npmignore ignore"),
-        (.xml, "xml plist xsd xsl xslt svg rss atom xib storyboard entitlements csproj fsproj vbproj props targets nuspec resx wsdl kml gpx xaml xliff xlf dae mobileconfig sdef pom iml tmtheme tmlanguage opml manifest"),
-        (.html, "html htm xhtml shtml vue svelte astro erb ejs hbs handlebars mustache njk jinja jinja2 j2 twig liquid jsp aspx cshtml razor tmpl gohtml"),
+        (.xml, "xml plist xsd xsl xslt svg rss atom xib storyboard entitlements csproj fsproj vbproj props targets nuspec resx wsdl kml gpx xaml xliff xlf dae mobileconfig sdef pom iml tmtheme tmlanguage opml manifest xcscheme stringsdict xmp xul rdf spf sptheme ecore wsf"),
+        (.html, "html htm xhtml shtml vue svelte astro erb ejs hbs handlebars mustache njk jinja jinja2 j2 twig liquid jsp aspx cshtml razor tmpl gohtml rhtml"),
         (.css, "css pcss postcss"),
         (.scss, "scss sass"),
         (.less, "less styl"),
@@ -280,10 +286,19 @@ public enum Language: UInt8, CaseIterable, Sendable {
         (.diff, "diff patch rej"),
         (.makefile, "mk mak make just"),
         (.dockerfile, "dockerfile containerfile"),
-        (.markdown, "md markdown mdown mkd mkdn mdwn mdtxt mdtext rmd qmd mdx livemd"),
+        (.markdown, "md markdown mdown mkd mkdn mkdown mdwn mdtxt mdtext rmd qmd mdx livemd"),
         (.shell, "cmake"),
         (.toml, "lock"),
     ]
+
+    /// Suffixes that wrap another file name (copies, examples, autoconf inputs). Registered
+    /// with Quick Look as types of their own (`peep-dev types`); detection looks through them.
+    public static let wrapperExtensions: Set<String> = [
+        "dist", "example", "sample", "template", "orig", "bak", "old", "backup", "in", "default", "new", "disabled",
+    ]
+    /// Template suffixes with a language of their own (HTML-ish, see `extensionTable`) used
+    /// only when the wrapped name has no known language: "x.yml.j2" is YAML, "x.j2" is HTML.
+    static let templateWrappers: Set<String> = ["j2", "jinja", "jinja2", "tmpl", "erb"]
 
     static let extensionMap: [String: Language] = {
         var m: [String: Language] = [:]
