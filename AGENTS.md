@@ -82,6 +82,7 @@ Scripts/dev.sh mddump <outdir> <files/dirs...>  # full dump per parsed .md: diff
 Scripts/dev.sh findbench <file> <query...>  # raw search vs full find path per query
 Scripts/dev.sh jumpbench <files...>        # outline jump cost (scroll + tile draws), flashes, highlighted row
 Scripts/dev.sh tilecheck <files...>        # random jumps/overscroll/resizes; visible rect always covered by tiles
+Scripts/dev.sh linkcheck <files.md...>     # every link resolves from a click on it
 Scripts/dev.sh symbols <files...>          # code outline entries as the sidebar shows them
 Scripts/profile.sh .build/release/peep-dev lexbench <file> 400   # Instruments Time Profiler summary
 FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instruction offsets
@@ -140,6 +141,14 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
     Never pass the tile margin to `willShow`: that silently made first paint lay out everything.
   - The background job starts *after* the first frame: its threads hold Core Text's per-font
     shaping lock, and a first draw competing with them was 5× slower.
+  - Layout threads each use their own `FontBook` (`main`, `workers[w]`). Core Text serializes
+    OpenType shaping per font *face* (every size/weight of `NSFont.systemFont` shares one lock),
+    so threads on the system fonts ran one at a time. Books make their fonts from the font
+    files (`FontFiles.ownFace`: own face, own lock; variation axes and cascade list copied, so
+    layout is identical: renders match pixel for pixel). Then Foundation's process-wide
+    attribute-dictionary uniquing lock was next: books keep per-style dictionaries uniqued
+    once, set per run with `CFAttributedStringSetAttributes` (no per-link attribute: links are
+    found by text offset, `linkRef`). Background layout of a 10 MB document: 1,245 -> 346 ms.
 - First-paint budget is measured with `peep-dev firstpaint`, not guessed. `NSVisualEffectView`
   cost ~14 ms there (CPU compositing in `renderInContext`); use plain colors unless something
   is actually behind the view.

@@ -20,12 +20,15 @@ public enum Prewarm {
         }
         // Markdown: parser statics, and Core Text shaping in the body/heading/code fonts.
         _ = MarkdownParser.parse(TextBuffer("# T\n\nA *b* **c** `d` [e](f) &amp; :tada:[^1]\n\n- g\n\n| h |\n|---|\n| i |\n\n<div align=\"center\"><img src=\"x\"></div>\n\n> [!NOTE]\n> j\n\n[^1]: k\n"))
+        // (The main-thread font book's fonts: made from the font files, see FontBook.)
         let m = MDMetrics()
+        let book = FontBook.main
         for (size, weight) in [(m.body, NSFont.Weight.regular), (m.body, .semibold), (m.headingSize(1), .semibold),
                                (m.headingSize(2), .semibold), (m.headingSize(3), .semibold)] {
-            shape("The quick brown fox jumps over 0123", NSFont.systemFont(ofSize: size, weight: weight))
+            shape("The quick brown fox jumps over 0123", book.font(size, weight: weight))
         }
-        shape("code", NSFont.monospacedSystemFont(ofSize: m.codeSize, weight: .regular))
+        shape("code", book.font(m.codeSize, mono: true))
+        shape("italic", book.font(m.body, italic: true))
     }
 
     private static func shape(_ s: String, _ font: CTFont) {

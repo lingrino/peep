@@ -7,7 +7,6 @@ enum MDAttr {
     static let kbd = NSAttributedString.Key("PeepKbd")                   // key cap box
     static let strike = NSAttributedString.Key("PeepStrike")             // line through
     static let image = NSAttributedString.Key("PeepImage")               // Int: image index
-    static let link = NSAttributedString.Key("PeepLink")                 // Int: link index
 }
 
 /// One laid-out run of rich text (a paragraph, heading, code block or table cell): a CTFrame
@@ -234,17 +233,21 @@ final class TextBox: @unchecked Sendable {
         return CGRect(x: rect.minX, y: rect.minY, width: 4, height: 16)
     }
 
-    /// Attribute at a UTF-8 offset (for link hit testing).
-    func run(at p: CGPoint) -> CTRun? {
+    /// UTF-8 offset of the character whose glyph is under `p` (nil: not over text).
+    func characterOffset(at p: CGPoint) -> Int? {
         let i = line(at: p.y)
         if i < 0 || p.y < lineTop[i] || p.y > lineBottom[i] { return nil }
         let x = p.x - lineX[i]
         guard let runs = CTLineGetGlyphRuns(lines[i]) as? [CTRun] else { return nil }
         for run in runs {
-            var pos = CGPoint.zero
-            CTRunGetPositions(run, CFRange(location: 0, length: 1), &pos)
-            let w = CGFloat(CTRunGetTypographicBounds(run, CFRange(location: 0, length: 0), nil, nil, nil))
-            if x >= pos.x && x <= pos.x + w { return run }
+            let n = CTRunGetGlyphCount(run)
+            if n == 0 { continue }
+            var pos = [CGPoint](repeating: .zero, count: n), adv = [CGSize](repeating: .zero, count: n)
+            var idx = [CFIndex](repeating: 0, count: n)
+            CTRunGetPositions(run, CFRange(location: 0, length: 0), &pos)
+            CTRunGetAdvances(run, CFRange(location: 0, length: 0), &adv)
+            CTRunGetStringIndices(run, CFRange(location: 0, length: 0), &idx)
+            for g in 0..<n where x >= pos[g].x && x < pos[g].x + max(adv[g].width, 1) { return u8(idx[g]) }
         }
         return nil
     }

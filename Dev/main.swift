@@ -602,6 +602,38 @@ func showCost(_ args: [String]) {
     }
 }
 
+/// Link hit testing: for every link run, a point in the middle of its first character must
+/// resolve to that link.
+@MainActor
+func linkCheck(_ args: [String]) {
+    for f in args {
+        let doc = Document.open(path: f)
+        guard let md = doc.content as? MarkdownContent else { continue }
+        _ = md.layout(width: 900)
+        md.finishLayout()
+        var ok = 0, bad = 0
+        for r in md.doc.runs where r.style.contains(.link) && !r.style.contains(.image) && r.ref >= 0 && r.end > r.start {
+            var e = Int(r.start) + 1
+            let t = md.doc.text.base
+            while e < Int(r.end) && t[e] & 0xC0 == 0x80 { e += 1 }   // whole first character
+            // ... with a following variation selector (U+FE0E/FE0F: EF B8 8E/8F), same glyph.
+            if e + 2 < Int(r.end) + 1 && t[e] == 0xEF && t[e + 1] == 0xB8 && (t[e + 2] == 0x8E || t[e + 2] == 0x8F) { e += 3 }
+            let a = md.rect(for: Int(r.start), Int(r.start)), b = md.rect(for: e, e)
+            // A link starting at a line wrap: its start's caret reads as the previous line's end.
+            let p = a.minY == b.minY ? CGPoint(x: (a.minX + b.minX) / 2, y: a.midY) : CGPoint(x: b.minX - 2, y: b.midY)
+            if md.link(at: p) == md.doc.links[Int(r.ref)] { ok += 1 } else {
+                bad += 1
+                if bad <= 4 {
+                    let txt = md.doc.text.string(Int(r.start), min(Int(r.end), Int(r.start) + 30))
+                    let before = md.doc.text.string(max(0, Int(r.start) - 12), Int(r.start))
+                    print("  miss: [\(before)|\(txt)] a=\(a) b=\(b) -> \(md.link(at: p) ?? "nil")")
+                }
+            }
+        }
+        print("\((f as NSString).lastPathComponent): \(ok) links found, \(bad) missed")
+    }
+}
+
 /// Tile coverage under outline jumps, overscroll past either end (what elastic scrolling
 /// does) and resizes: after every step the visible rect must be covered by placed tiles.
 @MainActor
@@ -752,6 +784,7 @@ MainActor.assumeIsolated {
     case "findbench": findBench(Array(args.dropFirst()))
     case "jumpbench": jumpBench(Array(args.dropFirst()))
     case "tilecheck": tileCheck(Array(args.dropFirst()))
+    case "linkcheck": linkCheck(Array(args.dropFirst()))
     case "symbols": symbolsDump(Array(args.dropFirst()))
     case "mdbench": mdbench(Array(args.dropFirst()))
     case "parsebench": parsebench(Array(args.dropFirst()))

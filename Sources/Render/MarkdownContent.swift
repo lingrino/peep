@@ -19,7 +19,7 @@ public final class MarkdownContent: DocumentContent {
     private var width: CGFloat = 0
     let images: ImageStore
     let m = MDMetrics()
-    let fonts = FontBook()
+    let fonts = FontBook.main
 
     struct LBlock {
         var y: CGFloat
@@ -518,11 +518,24 @@ public final class MarkdownContent: DocumentContent {
         guard bi < blocks.count else { return nil }
         let b = blocks[bi]
         for k in b.box0..<(b.box0 + b.boxN) where boxes[k].rect.insetBy(dx: -2, dy: -2).contains(p) {
-            if let run = boxes[k].run(at: p), let idx = (CTRunGetAttributes(run) as NSDictionary)[MDAttr.link] as? Int {
-                return doc.links[idx]
-            }
+            if let off = boxes[k].characterOffset(at: p), let ref = linkRef(at: off) { return doc.links[ref] }
         }
         return nil
+    }
+
+    /// Link (index) of the run covering text offset `off`: runs are in text order, so a binary
+    /// search for the last run starting at or before it.
+    func linkRef(at off: Int) -> Int? {
+        let runs = doc.runs
+        var lo = 0, hi = runs.count
+        while lo < hi {
+            let mid = (lo + hi) >> 1
+            if Int(runs[mid].start) <= off { lo = mid + 1 } else { hi = mid }
+        }
+        guard lo > 0 else { return nil }
+        let r = runs[lo - 1]
+        guard off < Int(r.end), r.style.contains(.link), !r.style.contains(.image), r.ref >= 0 else { return nil }
+        return Int(r.ref)
     }
 
     public var outlineEntries: [OutlineEntry] { doc.headings.map { OutlineEntry(level: $0.level, title: $0.title) } }

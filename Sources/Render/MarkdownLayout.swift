@@ -36,10 +36,31 @@ struct MDMetrics: Sendable {
     func lineGap(_ size: CGFloat, _ multiple: CGFloat = 1.5) -> CGFloat { size * (multiple - 1.2) }
 }
 
-/// Fonts by (size, weight, italic, mono), shared by layout threads.
+/// Fonts and text attributes for one layout thread at a time: `main` for the main thread,
+/// `workers[w]` for background worker w.
+///
+/// Why per thread: Core Text serializes shaping per font *face* (OpenType substitution and
+/// positioning take a lock shared by every instance of the face, i.e. every size and weight
+/// of `NSFont.systemFont`), so layout threads sharing the system fonts ran one at a time
+/// (64% of their time waiting). Fonts made from the font file's bytes are faces of their
+/// own with their own locks. Over every size/weight/italic/mono combination used, they lay
+/// out identically to the system fonts: glyph positions, widths, line metrics, and fallback
+/// (CJK, emoji, Greek, Cyrillic, Korean); Hebrew and Arabic fallback differs by ~1 pt a line.
+///
+/// Then the bottleneck was Foundation: attributed strings unique their attribute dictionaries
+/// in one process-wide table under one lock (and these fonts hash their descriptors, cascade
+/// list included). A dictionary that is already uniqued skips it, so each book keeps the
+/// dictionaries its runs use (`attributes`), uniqued once.
 final class FontBook: @unchecked Sendable {
     private var lock = os_unfair_lock()
     private var fonts: [Int: NSFont] = [:]
+    private var attrs: [AttrKey: CFDictionary] = [:]
+    private var paragraphStyles: [Int: NSParagraphStyle] = [:]
+
+    /// Main-thread layout (synchronous prefix, on-demand blocks, list markers).
+    static let main = FontBook()
+    /// Background layout: one book per concurrent worker (`PendingLayout.run`).
+    static let workers = (0..<max(1, ProcessInfo.processInfo.activeProcessorCount)).map { _ in FontBook() }
 
     func font(_ size: CGFloat, weight: NSFont.Weight = .regular, italic: Bool = false, mono: Bool = false) -> NSFont {
         let key = Int(size * 4) << 8 | Int((weight.rawValue + 1) * 10) << 2 | (italic ? 2 : 0) | (mono ? 1 : 0)
@@ -48,8 +69,101 @@ final class FontBook: @unchecked Sendable {
         if let f = fonts[key] { return f }
         var f = mono ? NSFont.monospacedSystemFont(ofSize: size, weight: weight) : NSFont.systemFont(ofSize: size, weight: weight)
         if italic, let i = NSFont(descriptor: f.fontDescriptor.withSymbolicTraits(.italic), size: size) { f = i }
+        f = FontFiles.ownFace(like: f) ?? f
         fonts[key] = f
         return f
+    }
+
+    struct AttrKey: Hashable {
+        var font: ObjectIdentifier
+        var color: ObjectIdentifier
+        var paragraph: Int       // `paragraphStyle` key
+        var flags: UInt8         // AttrFlag
+        var baseline: Int32      // offset in 1/100 pt
+    }
+
+    enum AttrFlag {
+        static let inlineCode: UInt8 = 1, kbd: UInt8 = 2, strike: UInt8 = 4
+    }
+
+    /// A uniqued attribute dictionary for these attributes (built once per book).
+    func attributes(font: NSFont, color: CGColor, paragraph: Int, flags: UInt8 = 0, baseline: CGFloat = 0) -> CFDictionary {
+        let key = AttrKey(font: ObjectIdentifier(font), color: ObjectIdentifier(color), paragraph: paragraph,
+                          flags: flags, baseline: Int32((baseline * 100).rounded()))
+        os_unfair_lock_lock(&lock)
+        if let d = attrs[key] { os_unfair_lock_unlock(&lock); return d }
+        os_unfair_lock_unlock(&lock)
+        var a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: paragraphStyle(paragraph)]
+        if flags & AttrFlag.inlineCode != 0 { a[MDAttr.inlineCode] = true }
+        if flags & AttrFlag.kbd != 0 { a[MDAttr.kbd] = true }
+        if flags & AttrFlag.strike != 0 { a[MDAttr.strike] = true }
+        if key.baseline != 0 { a[ctBaselineOffset] = baseline }
+        // As Foundation stores it: read back from an attributed string (uniqued).
+        let s = CFAttributedStringCreate(nil, " " as CFString, a as CFDictionary)!
+        let d = CFAttributedStringGetAttributes(s, 0, nil)!
+        os_unfair_lock_lock(&lock)
+        attrs[key] = d
+        os_unfair_lock_unlock(&lock)
+        return d
+    }
+
+    /// Paragraph style keys: alignment and line height multiple for text, or `codeParagraph`.
+    static func paragraphKey(_ align: MDAlign, lineHeight: CGFloat) -> Int { Int(align.rawValue) << 16 | Int((lineHeight * 100).rounded()) }
+    static let codeParagraph = -1
+
+    func paragraphStyle(_ key: Int) -> NSParagraphStyle {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        if let p = paragraphStyles[key] { return p }
+        let ps = NSMutableParagraphStyle()
+        if key == FontBook.codeParagraph {
+            ps.lineHeightMultiple = 1.45
+            os_unfair_lock_unlock(&lock)
+            let tab = 4 * CTFontGetAdvanceForGlyphMonospaced(font(MDMetrics().codeSize, mono: true))
+            os_unfair_lock_lock(&lock)
+            ps.defaultTabInterval = tab
+            ps.tabStops = []
+        } else {
+            ps.lineHeightMultiple = CGFloat(key & 0xFFFF) / 100
+            let align = MDAlign(rawValue: UInt8(key >> 16)) ?? .left
+            ps.alignment = align == .center ? .center : align == .right ? .right : .natural
+        }
+        paragraphStyles[key] = ps
+        return ps
+    }
+}
+
+/// The system font files, mapped once per process.
+enum FontFiles {
+    nonisolated(unsafe) private static var data: [String: CFData] = [:]
+    nonisolated(unsafe) private static var lock = os_unfair_lock()
+
+    /// `f` as a font of its own face, made from its file (nil: file unknown or unreadable;
+    /// the caller keeps the shared font).
+    static func ownFace(like f: NSFont) -> NSFont? {
+        let ct = f as CTFont
+        let name = CTFontCopyPostScriptName(ct) as String
+        var path = (CTFontCopyAttribute(ct, kCTFontURLAttribute) as? URL)?.path
+        if path == nil && name.hasPrefix(".AppleSystemUIFontMonospaced") {
+            // The monospaced system font reports no file; it is SF Mono.
+            path = name.contains("Italic") ? "/System/Library/Fonts/SFNSMonoItalic.ttf" : "/System/Library/Fonts/SFNSMono.ttf"
+        }
+        guard let path, let bytes = file(path), let base = CTFontManagerCreateFontDescriptorFromData(bytes) else { return nil }
+        var attrs: [CFString: Any] = [kCTFontNameAttribute: name,
+                                      // Fall back to the fonts the system font would (emoji, CJK, ...).
+                                      kCTFontCascadeListAttribute: CTFontCopyDefaultCascadeListForLanguages(ct, nil) ?? [] as CFArray]
+        if let v = CTFontCopyVariation(ct) { attrs[kCTFontVariationAttribute] = v }   // weight, optical size
+        let d = CTFontDescriptorCreateCopyWithAttributes(base, attrs as CFDictionary)
+        return CTFontCreateWithFontDescriptor(d, CTFontGetSize(ct), nil) as NSFont
+    }
+
+    private static func file(_ path: String) -> CFData? {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        if let d = data[path] { return d }
+        guard let d = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else { return nil }
+        data[path] = d as CFData
+        return d as CFData
     }
 }
 
@@ -86,7 +200,7 @@ struct LayoutEnv: @unchecked Sendable {
     let doc: MarkdownDocument
     let palette: Palette
     let m: MDMetrics
-    let fonts: FontBook
+    var fonts: FontBook
     let imageSizes: [CGSize]
     let x0: CGFloat
     let contentW: CGFloat
@@ -126,9 +240,16 @@ final class PendingLayout: @unchecked Sendable {
         let chunk = max(8, count / 48)
         let chunks = (count + chunk - 1) / chunk
         let first = self.first, count = self.count
-        DispatchQueue.concurrentPerform(iterations: chunks) { c in
-            for i in (c * chunk)..<min(count, (c + 1) * chunk) {
-                (base + i).initialize(to: MarkdownLayout.block(first + i, env))
+        // One worker per font book (a book is used by one thread at a time); worker w takes
+        // every `workers`-th chunk.
+        let workers = min(FontBook.workers.count, chunks)
+        DispatchQueue.concurrentPerform(iterations: workers) { w in
+            var e = env
+            e.fonts = FontBook.workers[w]
+            for c in stride(from: w, to: chunks, by: workers) {
+                for i in (c * chunk)..<min(count, (c + 1) * chunk) {
+                    (base + i).initialize(to: MarkdownLayout.block(first + i, e))
+                }
             }
         }
         results = Array(buf)
@@ -252,47 +373,59 @@ enum MarkdownLayout {
     static func inline(_ env: LayoutEnv, _ start: Int32, _ end: Int32, runs: Range<Int32>, font base: NSFont, color: CGColor,
                        align: MDAlign, lineHeight: CGFloat = 1.5) -> NSAttributedString {
         let doc = env.doc
-        let s = doc.text.string(Int(start), Int(end))
-        let ps = NSMutableParagraphStyle()
-        ps.lineHeightMultiple = lineHeight
-        ps.alignment = align == .center ? .center : align == .right ? .right : .natural
-        let a = NSMutableAttributedString(string: s, attributes: [.font: base, .foregroundColor: color, .paragraphStyle: ps])
-        if runs.isEmpty { return a }
+        let book = env.fonts
+        let s = doc.text.string(Int(start), Int(end)) as NSString
+        let paragraph = FontBook.paragraphKey(align, lineHeight: lineHeight)
+        // Each run carries its whole style: one cached (uniqued) attribute dictionary per run,
+        // set with CFAttributedStringSetAttributes (see FontBook). Runs don't overlap, except a
+        // linked image: its image run, then a link run over the same character (skipped here:
+        // the image draws itself, and links are found by offset).
+        let a = CFAttributedStringCreateMutable(nil, 0)!
+        CFAttributedStringReplaceString(a, CFRange(location: 0, length: 0), s)
+        CFAttributedStringSetAttributes(a, CFRange(location: 0, length: s.length),
+                                        book.attributes(font: base, color: color, paragraph: paragraph), true)
+        if runs.isEmpty { return a as NSAttributedString }
         let map = Utf16Map(doc.text, Int(start), Int(end))
         let size = base.pointSize
         let baseBold = (base.fontDescriptor.symbolicTraits.contains(.bold))
+        var lastImage = CFRange(location: -1, length: 0)
         for ri in runs {
             let r = doc.runs[Int(ri)]
-            let range = NSRange(location: map[Int(r.start)], length: map[Int(r.end)] - map[Int(r.start)])
+            let range = CFRange(location: map[Int(r.start)], length: map[Int(r.end)] - map[Int(r.start)])
             if range.length <= 0 { continue }
             let st = r.style
-            if st.contains(.image) {
+            if range.location == lastImage.location && range.length == lastImage.length { continue }
+            if st.contains(.image) {   // rare: a dictionary of its own (size, index)
+                lastImage = range
                 let sz = Int(r.ref) < env.imageSizes.count ? env.imageSizes[Int(r.ref)] : CGSize(width: 16, height: 16)
-                a.addAttribute(kCTRunDelegateAttributeName as NSAttributedString.Key, value: runDelegate(width: sz.width, ascent: sz.height), range: range)
-                a.addAttribute(MDAttr.image, value: Int(r.ref), range: range)
-                a.addAttribute(.foregroundColor, value: CGColor.clear, range: range)
+                // (With the paragraph style: an image can start the paragraph, whose first
+                // character's style sets its alignment.)
+                let d: [NSAttributedString.Key: Any] = [.font: base, .foregroundColor: CGColor.clear,
+                                                        .paragraphStyle: book.paragraphStyle(paragraph),
+                                                        kCTRunDelegateAttributeName as NSAttributedString.Key: runDelegate(width: sz.width, ascent: sz.height),
+                                                        MDAttr.image: Int(r.ref)]
+                CFAttributedStringSetAttributes(a, range, d as CFDictionary, true)
                 continue
             }
             var f = base
+            var flags: UInt8 = 0
             if st.contains(.code) || st.contains(.kbd) {
-                f = env.fonts.font((size * 0.88).rounded() + 0.5, weight: st.contains(.strong) ? .semibold : .regular, mono: true)
-                a.addAttribute(st.contains(.kbd) ? MDAttr.kbd : MDAttr.inlineCode, value: true, range: range)
+                f = book.font((size * 0.88).rounded() + 0.5, weight: st.contains(.strong) ? .semibold : .regular, mono: true)
+                flags |= st.contains(.kbd) ? FontBook.AttrFlag.kbd : FontBook.AttrFlag.inlineCode
             } else if st.contains(.strong) || st.contains(.emphasis) || st.contains(.superscript) || st.contains(.subscriptStyle) {
                 let sz = st.contains(.superscript) || st.contains(.subscriptStyle) ? size * 0.75 : size
-                f = env.fonts.font(sz, weight: st.contains(.strong) || baseBold ? .semibold : .regular, italic: st.contains(.emphasis))
+                f = book.font(sz, weight: st.contains(.strong) || baseBold ? .semibold : .regular, italic: st.contains(.emphasis))
             }
-            a.addAttribute(.font, value: f, range: range)
+            if st.contains(.strike) { flags |= FontBook.AttrFlag.strike }
             // Baseline offsets are negated: we draw in a flipped context (text matrix y = -1),
             // where Core Text's "up" offset lands below the baseline.
-            if st.contains(.superscript) { a.addAttribute(ctBaselineOffset, value: -size * 0.38, range: range) }
-            if st.contains(.subscriptStyle) { a.addAttribute(ctBaselineOffset, value: size * 0.18, range: range) }
-            if st.contains(.strike) { a.addAttribute(MDAttr.strike, value: true, range: range) }
-            if st.contains(.link) {
-                a.addAttribute(.foregroundColor, value: env.palette.link, range: range)
-                a.addAttribute(MDAttr.link, value: Int(r.ref), range: range)
-            }
+            let baseline: CGFloat = st.contains(.superscript) ? -size * 0.38 : st.contains(.subscriptStyle) ? size * 0.18 : 0
+            // Links are found by text offset (MarkdownContent.link(at:)), not by an attribute: a
+            // per-link value would make every link's dictionary unique.
+            let c = st.contains(.link) ? env.palette.link : color
+            CFAttributedStringSetAttributes(a, range, book.attributes(font: f, color: c, paragraph: paragraph, flags: flags, baseline: baseline), true)
         }
-        return a
+        return a as NSAttributedString
     }
 
     /// Code block: monospaced, syntax colored with the same lexers as code previews.
@@ -300,13 +433,14 @@ enum MarkdownLayout {
         let doc = env.doc
         let m = env.m
         let s = doc.text.string(Int(b.textStart), Int(b.textEnd))
-        let f = env.fonts.font(m.codeSize, mono: true)
-        let bold = env.fonts.font(m.codeSize, weight: .semibold, mono: true)
-        let ps = NSMutableParagraphStyle()
-        ps.lineHeightMultiple = 1.45
-        ps.defaultTabInterval = 4 * CTFontGetAdvanceForGlyphMonospaced(f)
-        ps.tabStops = []
-        let a = NSMutableAttributedString(string: s, attributes: [.font: f, .foregroundColor: env.palette.text, .paragraphStyle: ps])
+        let book = env.fonts
+        let f = book.font(m.codeSize, mono: true)
+        let bold = book.font(m.codeSize, weight: .semibold, mono: true)
+        let ns = s as NSString
+        let a = CFAttributedStringCreateMutable(nil, 0)!
+        CFAttributedStringReplaceString(a, CFRange(location: 0, length: 0), ns)
+        CFAttributedStringSetAttributes(a, CFRange(location: 0, length: ns.length),
+                                        book.attributes(font: f, color: env.palette.text, paragraph: FontBook.codeParagraph), true)
         if b.language != .plain && b.textEnd > b.textStart {
             let tokens = TokenStream(expectedBytes: Int(b.textEnd - b.textStart))
             // Lex in place: the byte after the block is "\n", which ends every token cleanly.
@@ -317,14 +451,15 @@ enum MarkdownLayout {
                 let kind = tokens.kinds[k]
                 if kind != 0 {
                     let ts = max(tokens.start(k), Int(b.textStart)), te = min(tokens.end(k), Int(b.textEnd))
-                    let range = NSRange(location: map[ts], length: map[te] - map[ts])
-                    a.addAttribute(.foregroundColor, value: env.palette.tokenColors[Int(kind)], range: range)
-                    if env.palette.tokenBold[Int(kind)] { a.addAttribute(.font, value: bold, range: range) }
+                    let range = CFRange(location: map[ts], length: map[te] - map[ts])
+                    let d = book.attributes(font: env.palette.tokenBold[Int(kind)] ? bold : f, color: env.palette.tokenColors[Int(kind)],
+                                            paragraph: FontBook.codeParagraph)
+                    CFAttributedStringSetAttributes(a, range, d, true)
                 }
                 k += 1
             }
         }
-        return a
+        return a as NSAttributedString
     }
 
     static func runDelegate(width: CGFloat, ascent: CGFloat) -> CTRunDelegate {
