@@ -133,6 +133,30 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   checks (slugs), `String.contains` (titles), `Language.named` lowercasing per code fence.
   Prefilter on bytes before doing real work.
 
+## Benchmarks and the bar
+
+The owner set pierre's Wasm `highlights` and `words` (pierrecomputer/pierre) as the *minimum*
+bar. Their published numbers (Apple M4 Pro / M5 Max): highlights TS → tokens 225 MiB/s
+(→ HTML 354; HTML/JSONC ~1,000); words Markdown → HTML ~930 MiB/s on the 211 KiB GFM spec,
+500–1,280 MiB/s on small files. Ours (`peep-dev lexbench` / `parsebench`, best of N):
+
+| Input | Peep | Bar |
+|---|---:|---:|
+| TypeScript (93 KB) lex | 1,760 MB/s | 225 |
+| Java / Swift / Rust lex | 1,600–2,700 MB/s | — |
+| C (520 KB) / lodash.js lex | 630 / 1,160 MB/s | — |
+| minified jQuery lex | 318 MB/s | — |
+| CommonMark spec (206 KB) parse | 349 MB/s | ~930 |
+| link-list README (78 KB) parse | 232 MB/s | — |
+| 3 KB README (HTML + ref defs) parse | 174 MB/s | 500+ |
+
+Lexing clears the bar. **Markdown parsing does not (≈3× short).** The remaining cost is
+structural, not hot spots: block scanning ~30%, inline tokenize ~25%, gather/emit copies
+~25%, allocation ~10%; skipping plain text with SIMD bought only 2% (tried, reverted). Closing
+the gap means a redesign: one pass from source to output without the per-block gather copy,
+link/image/ref strings as byte ranges instead of `String`s, a flatter node list. In absolute
+terms a typical README parses in 0.02–0.35 ms, so this matters mostly for 100 KB+ documents.
+
 ## Quick Look facts (verified on macOS 27)
 
 - QL matches **exact** UTIs only (no conformance). Many extensions have *dynamic* UTIs
