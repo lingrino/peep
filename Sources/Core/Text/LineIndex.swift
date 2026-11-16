@@ -1,4 +1,5 @@
 import Darwin
+import _Builtin_intrinsics.arm.neon
 
 /// Byte offsets of line starts, found with a SIMD newline scan.
 ///
@@ -25,26 +26,40 @@ public final class LineIndex: @unchecked Sendable {
         s[0] = 0
         var c = 1
         var i = 0
-        // 64 bytes per iteration: four compares, four nibble masks.
+        // 64 bytes per iteration -> one 64-bit newline mask (bit k = byte i+k), then
+        // "flatten" (simdjson): write 4 offsets unconditionally and advance by popcount, so
+        // the common 0-4 newlines per block take no data-dependent branches.
         let nl = splat(0x0A)
+        let weights = V16(1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128)
         while i < n {
-            let m0 = laneBits(load16(p + i) .== nl)
-            let m1 = laneBits(load16(p + i + 16) .== nl)
-            let m2 = laneBits(load16(p + i + 32) .== nl)
-            let m3 = laneBits(load16(p + i + 48) .== nl)
-            if (m0 | m1 | m2 | m3) != 0 {
-                if c + 64 > cap {
-                    let ncap = cap * 2
-                    let ns = UnsafeMutablePointer<UInt32>.allocate(capacity: ncap + 1)
-                    ns.update(from: s, count: c)
-                    s.deallocate()
-                    s = ns
-                    cap = ncap
+            if c + 64 > cap {
+                let ncap = cap * 2
+                let ns = UnsafeMutablePointer<UInt32>.allocate(capacity: ncap + 1)
+                ns.update(from: s, count: c)
+                s.deallocate()
+                s = ns
+                cap = ncap
+            }
+            let a = unsafeBitCast(load16(p + i) .== nl, to: V16.self) & weights
+            let b = unsafeBitCast(load16(p + i + 16) .== nl, to: V16.self) & weights
+            let d = unsafeBitCast(load16(p + i + 32) .== nl, to: V16.self) & weights
+            let e = unsafeBitCast(load16(p + i + 48) .== nl, to: V16.self) & weights
+            let r = vpaddq_u8(vpaddq_u8(a, b), vpaddq_u8(d, e))
+            var m = unsafeBitCast(vpaddq_u8(r, r), to: SIMD2<UInt64>.self)[0]
+            if m != 0 {
+                let k = m.nonzeroBitCount
+                let base = UInt32(truncatingIfNeeded: i + 1)
+                s[c] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+                s[c + 1] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+                s[c + 2] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+                s[c + 3] = base &+ UInt32(m.trailingZeroBitCount); m &= m &- 1
+                var w = c + 4
+                while m != 0 {
+                    s[w] = base &+ UInt32(m.trailingZeroBitCount)
+                    m &= m &- 1
+                    w &+= 1
                 }
-                LineIndex.emit(m0, i, s, &c)
-                LineIndex.emit(m1, i + 16, s, &c)
-                LineIndex.emit(m2, i + 32, s, &c)
-                LineIndex.emit(m3, i + 48, s, &c)
+                c &+= k
             }
             i &+= 64
         }
@@ -65,17 +80,6 @@ public final class LineIndex: @unchecked Sendable {
     }
 
     deinit { starts.deallocate() }
-
-    /// Appends `base + lane + 1` (the next line's start) for each set lane bit.
-    @inline(__always)
-    static func emit(_ mask: UInt64, _ base: Int, _ s: UnsafeMutablePointer<UInt32>, _ c: inout Int) {
-        var m = mask
-        while m != 0 {
-            s[c] = UInt32(truncatingIfNeeded: base + (m.trailingZeroBitCount >> 2) + 1)
-            c &+= 1
-            m &= m &- 1
-        }
-    }
 
     @inline(__always) public func start(_ line: Int) -> Int { Int(starts[line]) }
 

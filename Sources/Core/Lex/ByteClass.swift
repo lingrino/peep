@@ -10,6 +10,9 @@ public struct ByteClass: @unchecked Sendable {
 
     /// Pointer into a leaked 256-byte table (tables live for the process lifetime).
     public let table: UnsafePointer<UInt8>
+    /// SIMD membership tests for identifier-continue and whitespace bytes (16 at a time).
+    public let identSet: NibbleSet
+    public let spaceSet: NibbleSet
 
     /// Standard table: identifiers are [A-Za-z_][A-Za-z0-9_]* plus every byte >= 0x80 (so
     /// UTF-8 identifiers stay one token without decoding). `extraIdent`/`extraStart` add
@@ -35,6 +38,8 @@ public struct ByteClass: @unchecked Sendable {
         for b in extraIdent.utf8 { t[Int(b)] |= ByteClass.identCont }
         for b in extraStart.utf8 { t[Int(b)] |= ByteClass.identStart | ByteClass.identCont }
         table = UnsafePointer(t)
+        identSet = NibbleSet { t[Int($0)] & ByteClass.identCont != 0 }
+        spaceSet = NibbleSet { t[Int($0)] & ByteClass.space != 0 }
     }
 
     @inline(__always) public subscript(_ b: UInt8) -> UInt8 { table[Int(b)] }

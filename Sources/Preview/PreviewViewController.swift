@@ -2,83 +2,42 @@ import AppKit
 import QuickLookUI
 import os
 
-// SCAFFOLD: experiment to learn which events reach a view-based QL preview on this macOS.
 let log = Logger(subsystem: "com.lingrino.peep", category: "preview")
 
-final class ProbeTextView: NSTextView {
-    override func keyDown(with event: NSEvent) {
-        log.notice("keyDown chars=\(event.charactersIgnoringModifiers ?? "", privacy: .public) mods=\(event.modifierFlags.rawValue)")
-        super.keyDown(with: event)
-    }
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        log.notice("performKeyEquivalent chars=\(event.charactersIgnoringModifiers ?? "", privacy: .public) mods=\(event.modifierFlags.rawValue)")
-        return super.performKeyEquivalent(with: event)
-    }
-    override func mouseDown(with event: NSEvent) {
-        log.notice("mouseDown window=\(String(describing: self.window), privacy: .public) key=\(self.window?.isKeyWindow ?? false) fr=\(String(describing: self.window?.firstResponder), privacy: .public)")
-        super.mouseDown(with: event)
-    }
-    override var needsPanelToBecomeKey: Bool { true }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func becomeFirstResponder() -> Bool {
-        log.notice("becomeFirstResponder")
-        return super.becomeFirstResponder()
-    }
-}
-
+/// Quick Look principal class. One instance per visible preview (Finder's column preview and
+/// the spacebar panel each get their own); the extension process is reused across previews.
 @objc(PeepPreviewController)
 final class PreviewViewController: NSViewController, @preconcurrency QLPreviewingController {
-    private var textView: ProbeTextView!
+    private var preview: PreviewView!
 
     override func loadView() {
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        scroll.hasVerticalScroller = true
-        scroll.autoresizingMask = [.width, .height]
-        let tv = ProbeTextView(frame: scroll.bounds)
-        tv.isEditable = false
-        tv.isSelectable = true
-        tv.usesFindBar = true
-        tv.isIncrementalSearchingEnabled = true
-        tv.autoresizingMask = [.width]
-        tv.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        scroll.documentView = tv
-        textView = tv
-        let root = NSView(frame: scroll.frame)
-        root.autoresizingMask = [.width, .height]
-        scroll.frame = NSRect(x: 0, y: 0, width: 800, height: 570)
-        let field = NSSearchField(frame: NSRect(x: 10, y: 572, width: 300, height: 24))
-        field.autoresizingMask = [.minYMargin]
-        field.target = self
-        field.action = #selector(searchChanged(_:))
-        root.addSubview(scroll)
-        root.addSubview(field)
-        view = root
-        log.notice("loadView pid=\(getpid())")
-    }
-
-    @objc func searchChanged(_ sender: NSSearchField) {
-        log.notice("search field: \(sender.stringValue, privacy: .public)")
-    }
-
-    deinit { log.notice("deinit \(ObjectIdentifier(self).hashValue)") }
-    override func viewDidDisappear() {
-        super.viewDidDisappear()
-        log.notice("viewDidDisappear \(ObjectIdentifier(self).hashValue)")
-    }
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        log.notice("viewDidLayout \(ObjectIdentifier(self).hashValue) size=\(self.view.bounds.size.width)x\(self.view.bounds.size.height) wframe=\(String(describing: self.view.window?.frame), privacy: .public)")
-    }
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        log.notice("viewDidAppear \(ObjectIdentifier(self).hashValue) window=\(String(describing: self.view.window), privacy: .public) wframe=\(String(describing: self.view.window?.frame), privacy: .public) screen=\(String(describing: self.view.window?.screen?.frame), privacy: .public)")
-        view.window?.makeFirstResponder(textView)
+        preview = PreviewView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view = preview
     }
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
-        log.notice("prepare \(url.lastPathComponent, privacy: .public) main=\(Thread.isMainThread)")
-        let s = (try? String(contentsOf: url, encoding: .utf8)) ?? "<unreadable>"
-        textView.string = "PEEP SCAFFOLD\n\n" + s
+        let t0 = nanotime()
+        let doc = Document.open(path: url.path)
+        preview.show(doc)
+        preferredContentSize = preferredSize(for: doc)
         handler(nil)
+        let ms = Double(nanotime() - t0) / 1e6
+        log.notice("prepare \(url.lastPathComponent, privacy: .public): \(doc.timingSummary, privacy: .public) | total \(ms, format: .fixed(precision: 2))ms")
+    }
+
+    /// Ask Quick Look for a panel that fits the content (it clamps to the screen).
+    private func preferredSize(for doc: Document) -> NSSize {
+        let c = doc.content
+        let screen = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
+        switch doc.kind {
+        case .code:
+            let w = min(max(c.size.width + c.gutterWidth + 24, 560), screen.width * 0.7)
+            let h = min(max(c.size.height + 8, 240), screen.height * 0.8)
+            return NSSize(width: w.rounded(), height: h.rounded())
+        case .markdown:
+            return NSSize(width: min(980, screen.width * 0.7), height: (screen.height * 0.8).rounded())
+        default:
+            return NSSize(width: 560, height: 320)
+        }
     }
 }

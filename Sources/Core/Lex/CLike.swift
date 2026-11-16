@@ -74,7 +74,6 @@ public enum CLike {
         let opener: UInt8 = closer == 0x29 ? 0x28 : closer == 0x7D ? 0x7B : 0xFF
         var depth = 0
         var i = start
-        var lineStart = true
         var prev: UInt8 = newline       // last significant byte
         var prevKeyword = false
         var hint: UInt8 = 0
@@ -82,23 +81,20 @@ public enum CLike {
         while i < end {
             let b = p[i]
             let c = cc[b]
-            if c & ByteClass.space != 0 {
-                if b == newline { lineStart = true }
-                i &+= 1
-                continue
-            }
-
             // Identifiers, keywords, and the call/declaration/type heuristics.
             if c & ByteClass.identStart != 0 {
                 let st = i
+                // Most identifiers are short: scalar for 8 bytes, SIMD beyond.
                 i &+= 1
-                while i < end && cc.isIdent(p[i]) { i &+= 1 }
+                let stop = min(end, i &+ 8)
+                while i < stop && cc.isIdent(p[i]) { i &+= 1 }
+                if i == stop && i < end { i = cc.identSet.skip(p, i, end) }
                 let len = i - st
 
                 // String prefixes glued to a quote: f"..", r#"..", R"(..)", b'..'.
                 if i < end, p[i] == quote || p[i] == apos || p[i] == 0x23 {
                     if let j = prefixedString(s, p, st, i, end, out) {
-                        i = j; prev = quote; prevKeyword = false; lineStart = false; hint = 0
+                        i = j; prev = quote; prevKeyword = false; hint = 0
                         continue
                     }
                 }
@@ -129,14 +125,20 @@ public enum CLike {
                 hint = newHint
                 prev = p[i - 1]
                 prevKeyword = kw != 0
-                lineStart = false
+                continue
+            }
+
+            if c & ByteClass.space != 0 {
+                // Single spaces dominate; indentation runs go through SIMD.
+                i &+= 1
+                if i < end && cc.isSpace(p[i]) { i = cc.spaceSet.skip(p, i &+ 1, end) }
                 continue
             }
 
             if c & ByteClass.digit != 0 {
                 let j = number(p, i, end, cc)
                 out.add(i, j, .number)
-                i = j; prev = 0x30; prevKeyword = false; lineStart = false
+                i = j; prev = 0x30; prevKeyword = false
                 continue
             }
 
@@ -206,7 +208,7 @@ public enum CLike {
                     j = matchBracket(p, i + (p[i + 1] == 0x21 ? 2 : 1), end, 0x5B, 0x5D); out.add(i, j, .attribute)
                 } else if s.swiftRawStrings && (p[i + 1] == quote || p[i + 1] == 0x23), let k = swiftRaw(p, i, end) {
                     out.add(i, k, .string); j = k
-                } else if s.hashPreprocessor && lineStart {
+                } else if s.hashPreprocessor && atLineStart(p, start, i) {
                     j = preprocessor(p, i, end, cc, out)
                 } else if s.hashComment {
                     j = lineEnd(p, i, end); out.add(i, j, .comment); significant = false
@@ -297,7 +299,6 @@ public enum CLike {
             if significant {
                 prev = p[j - 1]
                 prevKeyword = false
-                lineStart = false
                 hint = b == 0x3C || b == 0x2C ? hint : 0   // keep hint across generics `class Foo<`
             }
             i = j
@@ -306,6 +307,13 @@ public enum CLike {
     }
 
     // MARK: - Pieces
+
+    /// True if only spaces/tabs precede `i` on its line (within the lexed range).
+    static func atLineStart(_ p: UnsafePointer<UInt8>, _ start: Int, _ i: Int) -> Bool {
+        var j = i - 1
+        while j >= start && (p[j] == 0x20 || p[j] == 0x09) { j -= 1 }
+        return j < start || p[j] == newline
+    }
 
     @inline(__always)
     static func nextSignificant(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> UInt8 {

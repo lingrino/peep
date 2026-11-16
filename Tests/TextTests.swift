@@ -85,3 +85,58 @@ let textTests: [Test] = [
         expect(valid(Array(String(repeating: "aé€😀", count: 100).utf8)))
     },
 ]
+
+let searchTests: [Test] = [
+    Test("search: basics and case folding") {
+        let t = TextBuffer("Hello hello HELLO hel\nhelLo")
+        func f(_ q: String, _ cs: Bool) -> [Int] {
+            let m = Search.find(t, Array(q.utf8), caseSensitive: cs)
+            return (0..<m.count).map { m.start($0) }
+        }
+        expectEqual(f("hello", false), [0, 6, 12, 22])
+        expectEqual(f("hello", true), [6])
+        expectEqual(f("Hello", true), [0])
+        expectEqual(f("l", true).count, 6)
+        expectEqual(f("x", false), [])
+        expect(Search.isCaseSensitive(Array("Hi".utf8)))
+        expect(!Search.isCaseSensitive(Array("hi".utf8)))
+    },
+    Test("search: non-overlapping, block boundaries, long needles") {
+        let t = TextBuffer(String(repeating: "a", count: 100))
+        let m = Search.find(t, Array("aa".utf8), caseSensitive: true)
+        expectEqual(m.count, 50)
+        var s = String(repeating: "x", count: 1000)
+        s += "The Quick Brown Fox Jumps Over"
+        s += String(repeating: "y", count: 37)
+        let t2 = TextBuffer(s)
+        let m2 = Search.find(t2, Array("the quick brown fox jumps over".utf8), caseSensitive: false)
+        expectEqual(m2.count, 1)
+        expectEqual(m2.start(0), 1000)
+        // Match touching the very end of the text.
+        let m3 = Search.find(t2, Array("yyy".utf8), caseSensitive: true)
+        expectEqual(m3.end(m3.count - 1) <= t2.count, true)
+        expectEqual(m3.count, 12)
+    },
+    Test("search: matches brute force on random text") {
+        var rng = SystemRandomNumberGenerator()
+        let alphabet = Array("abAB \n€x".utf8)
+        for _ in 0..<200 {
+            let n = Int.random(in: 0..<300, using: &rng)
+            let bytes = (0..<n).map { _ in alphabet[Int.random(in: 0..<alphabet.count, using: &rng)] }
+            let q = (0..<Int.random(in: 1...4, using: &rng)).map { _ in alphabet[Int.random(in: 0..<4, using: &rng)] }
+            let t = bytes.withUnsafeBytes { TextBuffer(copying: $0) }
+            for cs in [true, false] {
+                let m = Search.find(t, q, caseSensitive: cs)
+                var want: [Int] = []
+                var i = 0
+                func eq(_ a: UInt8, _ b: UInt8) -> Bool {
+                    cs ? a == b : (a >= 65 && a <= 90 ? a | 32 : a) == (b >= 65 && b <= 90 ? b | 32 : b)
+                }
+                while i + q.count <= n {
+                    if (0..<q.count).allSatisfy({ eq(bytes[i + $0], q[$0]) }) { want.append(i); i += q.count } else { i += 1 }
+                }
+                expectEqual((0..<m.count).map { m.start($0) }, want)
+            }
+        }
+    },
+]

@@ -29,7 +29,7 @@ else
   OPT=(-Onone -g -DDEBUG)
 fi
 
-CORE=(Sources/Core/**/*.swift(N))
+CORE=(Sources/Core/**/*.swift(N) Sources/Render/**/*.swift(N))
 
 # Quick Look extension: entry point is NSExtensionMain (from Foundation), not main.
 swiftc "${COMMON[@]}" "${OPT[@]}" -application-extension -parse-as-library \
