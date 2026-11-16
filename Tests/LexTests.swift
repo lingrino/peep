@@ -151,6 +151,7 @@ let lexTests: [Test] = [
         expectEqual(syms(.c, "struct node { int v; };\nstatic int add(int a, int b) {\n  struct node n; return helper(a);\n}\nint proto(void);\n"),
                     ["struct node", "add"])
         expectEqual(syms(.java, "class A {\n  void run() {\n    new Thread() { };\n    go(x);\n  }\n}\n"), ["class A", ">run"])
+        expectEqual(syms(.java, "class B {\n  Stream open(String p) {\n    return with(p);\n  }\n}\n"), ["class B", ">open"])
         expectEqual(syms(.kotlin, "@file:Opt(Foo::class)\nclass C {\n  fun f() {}\n}\n"), ["class C", ">f"])
         expectEqual(syms(.python, "class A:\n    def m(self):\n        def inner(): pass\ndef top(): pass\n"), ["class A", ">m", ">>inner", "top"])
     },

@@ -60,7 +60,9 @@ public enum Specs {
     ])) { s in s.hashPreprocessor = true; s.csharpStrings = true; s.tripleQuotes = true; s.keywordlessDefinitionDepth = 3 }
 
     public static let java = CLikeSpec(keywords: KeywordTable([
-        (K, "abstract assert break case catch const continue default do else exports extends final finally for goto if implements import instanceof module native new non-sealed open opens package permits private protected provides public requires return sealed static strictfp super switch synchronized throw throws to transient transitive try uses var volatile when while with yield"),
+        // module-info words (exports, open, requires, to, with, ...) are left out: they're
+        // keywords only there, and common method names everywhere else.
+        (K, "abstract assert break case catch const continue default do else extends final finally for goto if implements import instanceof native new package permits private protected public return sealed static strictfp super switch synchronized throw throws transient try var volatile when while yield"),
         (T, "class interface enum record"),
         (Y, "boolean byte char double float int long short void"),
         (C, "true false null"), (B, "this super"),
