@@ -99,7 +99,7 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         let t0 = nanotime()
         let doc = Document.open(path: url.path)
-        let preferred = preferredSize(for: doc)
+        let preferred = preferredSize()
         preferredContentSize = preferred
         // Lay out at the size Quick Look is about to give the panel, not the transient one it
         // has now (avoids a second markdown layout). Finder's small column-view preview pane
@@ -124,22 +124,14 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
 
     private static var firstPrepare = true
 
-    /// Ask Quick Look for a panel that fits the content (it clamps to the screen).
-    private func preferredSize(for doc: Document) -> NSSize {
-        let c = doc.content
+    /// One panel size for every preview. Quick Look resizes its panel to each preview's
+    /// preferred size, and resizing while stepping through files with the panel open (arrow
+    /// keys) stalled this process's main thread 430-480 ms at a time: ViewBridge tears down the
+    /// previous preview's service window with a synchronous WindowServer round trip, which
+    /// waited out the resize. Sized per file (code fitted its content) the panel also jumped
+    /// around. Wide enough for the symbol sidebar (shown from 780 pt).
+    private func preferredSize() -> NSSize {
         let screen = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
-        switch doc.kind {
-        case .code:
-            // Room for the symbol sidebar (shown from 780 pt) when the file has one.
-            let side = !c.outlineEntries.isEmpty
-            let w = min(side ? max(c.size.width + c.gutterWidth + 24 + OutlineView.width, 780) : max(c.size.width + c.gutterWidth + 24, 560),
-                        screen.width * 0.7)
-            let h = min(max(c.size.height + 8, 240), screen.height * 0.8)
-            return NSSize(width: w.rounded(), height: h.rounded())
-        case .markdown:
-            return NSSize(width: min(980, screen.width * 0.7), height: (screen.height * 0.8).rounded())
-        default:
-            return NSSize(width: 560, height: 320)
-        }
+        return NSSize(width: min(980, (screen.width * 0.7).rounded()), height: (screen.height * 0.8).rounded())
     }
 }

@@ -293,6 +293,12 @@ as a fix with a test), and stay clean under `-sanitize=address`.
 - Killing the extension while a panel shows it (every install does) leaves that panel in a
   "failed during preview" state; close it and move the selection to recover. Not a bug.
 - Remote view frames reported to the extension are synthetic; only sizes are meaningful.
+- The panel takes each preview's `preferredContentSize`. Every Peep preview asks for the
+  same size: sized per file (code fitted its content), stepping through files with the panel
+  open (arrow keys) stalled the extension's main thread 430–480 ms on some files. ViewBridge
+  tears down the previous preview's service window with a synchronous WindowServer
+  transaction (`-[NSViewServiceMarshal invalidate]` → `SLSConnectionSynchronizeSLSCATransaction`)
+  that waited out the panel's resize. Finder skipped files meanwhile ("jumpy").
 - Clicks reach the extension **~510 ms late** (measured against the agent's event tap on the
   same clock): Quick Look holds every mouse-down/up for the double-click interval, because a
   double-click in the panel opens the file in its default app. Selection drags are unaffected
@@ -331,6 +337,10 @@ as a fix with a test), and stay clean under `-sanitize=address`.
   fonts, glyph tables and lookup tables on a background thread: cold first prepare 9 → 3 ms.
 - Debug-level lines (`--level debug`) include each preview's first paint ("first paint: N
   tiles drawn in X ms, Y ms after setContent") and markdown layout timings.
+- Where the extension's time goes outside our code (stalls between prepare and Quick Look
+  showing the view): a temporary main-thread watchdog (a thread pinging the main queue every
+  5 ms, logging gaps over 40 ms) finds the stalls, `sample <pid> 10 1` while reproducing shows
+  what the main thread waits on. `viewDidAppear` marks when Quick Look shows a preview.
 - Agent state: `launchctl print gui/$(id -u)/com.lingrino.peep.agent`.
 - Extension registration: `pluginkit -m -v -i com.lingrino.peep.preview` (`+` = enabled).
 - Another QL extension claiming the same types (e.g. Peek) can win; disable it with
