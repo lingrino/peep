@@ -39,6 +39,9 @@ public final class Document {
         var name = (path as NSString).lastPathComponent
         // Archives are listed from their headers, never loaded whole.
         if let kind = ArchiveKind.of(fileName: name) { return openArchive(path: path, name: name, kind: kind, typography: typography) }
+        if SQLitePreview.extensions.contains((name as NSString).pathExtension.lowercased()) && SQLitePreview.isSQLite(path: path) {
+            return openSQLite(path: path, name: name)
+        }
         let isLog = path.lowercased().hasSuffix(".log")
         var file: LoadedFile
         var compressedNotice: String?
@@ -59,6 +62,10 @@ public final class Document {
             }
         }
         mark("read")
+        // SQLite under another name (Core Data stores, extensionless files).
+        if SQLitePreview.isSQLite(file.raw.base, file.raw.count) && compressedNotice == nil && file.offset == 0 {
+            return openSQLite(path: path, name: name)
+        }
         let decoded = Decoder.decode(file.raw, truncated: file.truncated)
         mark("decode")
         var text: TextBuffer
@@ -189,6 +196,22 @@ public final class Document {
     /// Time allowed for decompressing a single compressed file before the preview shows what
     /// it has (the notice says it's the first part).
     static let decompressBudget: UInt64 = 40_000_000
+
+    static func openSQLite(path: String, name: String) -> Document {
+        let t0 = nanotime()
+        let (md, notice) = SQLitePreview.markdown(path: path, name: name)
+        let t1 = nanotime()
+        let parsed = MarkdownParser.parse(TextBuffer(md))
+        let t2 = nanotime()
+        let content = MarkdownContent(doc: parsed, baseDir: nil)
+        var st = stat()
+        let size = stat(path, &st) == 0 ? Int(st.st_size) : 0
+        let doc = Document(kind: .markdown, content: content, fileSize: size, truncated: false)
+        doc.timings = [("sqlite", t1 - t0), ("parse", t2 - t1)]
+        doc.path = path
+        doc.notice = notice
+        return doc
+    }
 
     /// Lists an archive: 25 ms of reading now; a listing that isn't done by then shows what it
     /// has and is replaced when the background pass finishes (big tarballs must be decoded).

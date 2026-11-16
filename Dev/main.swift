@@ -152,8 +152,8 @@ func types(_ args: [String]) {
             add(dynamicUTI(e))
         }
     }
-    // Archives (listed) and single compressed files (previewed decompressed).
-    for e in ArchiveKind.registeredExtensions {
+    // Archives (listed), single compressed files (previewed decompressed), SQLite.
+    for e in ArchiveKind.registeredExtensions + SQLitePreview.extensions.sorted() {
         if let t = UTType(filenameExtension: e), !t.isDynamic, !exclude.contains(t.identifier) { add(t.identifier) }
         add(dynamicUTI(e))
     }
