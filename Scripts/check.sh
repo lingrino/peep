@@ -65,7 +65,9 @@ step linkcheck $DEV linkcheck $MD
 step geometry  zsh -c 'for f in "$@"; do out=$('$DEV' layout "$f" 420) || { echo "$f: layout failed"; exit 1 }
   [[ $out == *"GEOMETRY ERRORS"* ]] && { echo "$f"; exit 1 }; done; exit 0' _ $MD
 python3 -I Scripts/make-adversarial.py .build/adversarial
-step adversarial $DEV smoke --budget 1500 --max-mb 3000 --images .build/adversarial   # crashes, traps, runaway work
+# Crashes, traps, runaway work. The budget is ~3x the slowest file on an M4; a super-linear
+# case blows through it by far more. CI's shared runners are slower: validate.yml raises it.
+step adversarial $DEV smoke --budget ${PEEP_SMOKE_BUDGET:-1500} --max-mb 3000 --images .build/adversarial
 
 if [[ ${1:-} == --corpus ]]; then
   if [[ -d .build/corpus/files ]]; then

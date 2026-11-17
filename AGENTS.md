@@ -35,12 +35,15 @@ compromise for latency. Read this whole file before changing anything.
      and new `peep-dev` + `diff -r`, `parsebench .build/corpus/files`, ASAN (see Benchmarks);
    - Quick Look itself (when it shows previews, stalls in its code paths): `DIAG=1
      Scripts/build.sh install`, `peep-dev panelwatch`, the log stream (see Debugging).
-3. `Scripts/build.sh install`, try it in Finder (computer use works), commit.
+3. `Scripts/build.sh install`, try it in Finder (computer use works), then branch, commit
+   and open a PR: `main` takes changes only through PRs whose CI passes, each one is
+   squash-merged, and every merge is a release (see CI and releases).
 
 Not here on purpose: a formatter or linter (the bar is zero warnings; a formatter would churn
-hand-laid-out hot loops), CI (needs macOS 27 on Apple Silicon; `check.sh` is the gate),
-checked-in golden images (macOS font updates move pixels; compare against a revision on the
-same machine instead), SwiftPM/XCTest (see Commands). `peep-dev` is offline: remote images
+hand-laid-out hot loops), checked-in golden images (macOS font updates move pixels; compare
+against a revision on the same machine instead), SwiftPM/XCTest (see Commands). CI runs
+`check.sh`, but steps 2 and 3 need this Mac (Finder, Quick Look, the Accessibility grant, a
+quiet machine for timing): CI passing is not the bar. `peep-dev` is offline: remote images
 never load there (`render --remote` fetches them), so checks and benchmarks are deterministic.
 
 ## Processes
@@ -91,7 +94,8 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
    zoomed screenshot shows the button, then check `pbpaste`.
 3. **Peep.app** — `Sources/App/HostApp.swift`. Opening it shows setup status (extension,
    agent, Accessibility) and can open any file in a viewer window with the same renderer.
-   `Peep --register` (used by the installer) writes/reloads the LaunchAgent plist.
+   `Peep --register` (used by the installer) writes/reloads the LaunchAgent plist. Opening
+   the installed copy registers the agent too: that is how a brew install starts it.
 
 ## Source map
 
@@ -108,7 +112,8 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 | `Tests/` | Zero-dependency test harness + tests (text, search, lexers, markdown, archives, notebooks) |
 | `Examples/` | A sample of every supported type for looking at by hand (see its README); binaries come from `Scripts/make-examples.sh` |
 | `Bundle/` | Info.plists, entitlements |
-| `Scripts/` | build, test, check, dev, compare/baseline, corpus, profile, signing, type/emoji/example generation |
+| `Scripts/` | build, test, check, dev, compare/baseline, corpus, profile, signing, release, type/emoji/example generation |
+| `.github/` | workflows: `validate` (PR checks), `release` (every merge to main), `review`; `renovate.json` at the root |
 
 `Core` imports no Foundation (keep it that way: plain Swift + SIMD). `Render` uses AppKit/Core Text.
 
@@ -144,7 +149,9 @@ FOCUS=CLike.lex python3 Scripts/profile.py <trace>               # hot instructi
 Scripts/gen-types.sh         # regenerate QLSupportedContentTypes after adding extensions
 Scripts/gen-emoji.py <github.json>  # regenerate EmojiTable.swift (emojibase-data en/shortcodes/github.json)
 Scripts/make-examples.sh [--large]  # regenerate Examples/ binaries (deterministic); --large: huge files in Examples/Large (ignored)
-Scripts/setup-signing.sh     # one-time per machine: local code-signing identity
+Scripts/setup-signing.sh     # one-time per Mac: the Developer ID for local builds (see Signing)
+Scripts/release.sh           # what CI publishes: .build/dist/ zip + cask (not notarized locally)
+PEEP_SIGN_IDENTITY=- Scripts/build.sh   # ad-hoc build, without the maintainer's certificate
 ```
 
 Visual checks: `Scripts/dev.sh render` produces PNGs of the real view stack; look at them.
@@ -153,7 +160,11 @@ End-to-end checks need Finder: select a file, Space, ⌘F (computer-use tools wo
 No SwiftPM/Xcode project: `swiftc` compiles `Sources/Core` + `Sources/Render` *into* each binary
 as one whole module (full cross-file optimization). Release flags: `-O -wmo
 -enforce-exclusivity=unchecked -target-cpu apple-m4`. The Command Line Tools are the default
-toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
+toolchain (`DEVELOPER_DIR`); CI builds with Xcode (the workflows' `DEVELOPER_DIR`), whose Swift
+should match the CLT's. `-target-cpu apple-m4` only tunes scheduling today: built for
+`apple-m1` and `apple-m4`, peep-dev used the same 165 instruction mnemonics (2026-11), so
+releases also run on older Apple Silicon and on CI's runners. A compiler that starts using
+M4-only instructions would make CI's `check` crash (SIGILL) on older runner hardware.
 
 ## Performance rules (learned the hard way)
 
@@ -415,15 +426,74 @@ as a fix with a test), and stay clean under `-sanitize=address`.
 
 ## Signing, permissions, agent
 
-- `Scripts/setup-signing.sh` creates a self-signed identity ("Peep Local Signing") in a
-  dedicated keychain; `build.sh` signs with it (falls back to ad-hoc). Stable designated
-  requirement ⇒ the Accessibility grant survives rebuilds. Ad-hoc signing breaks it every build.
+- Local builds sign with the same Developer ID as releases (no timestamp, not notarized),
+  from a dedicated keychain (`~/Library/Keychains/developer-id.keychain-db`, password in
+  `~/Library/Application Support/DeveloperID/`) that `Scripts/setup-signing.sh` fills from
+  `github/keys/apple-developer` (AWS SSO); `build.sh` refuses to build without it unless
+  `PEEP_SIGN_IDENTITY=-` (ad-hoc, CI). The maintainer's other Mac apps use the same keychain
+  (a copy of the script with the same paths), so it is set up once per Mac. Every Developer
+  ID signature has the same designated requirement (bundle id + team ID), so the agent's
+  Accessibility grant carries across `brew upgrade` and `Scripts/build.sh install` and
+  survives certificate renewals. Never switch local builds to ad-hoc or another identity,
+  or change the bundle ids (`com.lingrino.peep`, `com.lingrino.peep.preview`) or the agent's
+  label: that means granting Accessibility again. macOS 27 lists the grant under Privacy &
+  Security → Device Control and Data Access. After a signing change the old entry stays
+  but no longer matches: remove Peep there (−) and add /Applications/Peep.app again (+);
+  switching the old entry on doesn't take. Without the grant there is no event tap, so no
+  key forwarding, no early outline clicks (~0.5 s late) and no copy-path button; the
+  agent logs `trusted=` at start. (Until 2026-11-16 builds used a
+  self-signed "Peep Local Signing" identity; a Mac that still has
+  `~/Library/Keychains/peep-signing.keychain-db` can delete it.)
 - The agent is a plain LaunchAgent in `~/Library/LaunchAgents/com.lingrino.peep.agent.plist`,
   **not** `SMAppService`: SMAppService pins the executable's cdhash in a launch constraint,
-  which every local rebuild violates (`OS_REASON_CODESIGNING`, then launchd drops the job).
-- Install updates the bundle in place (`rsync --delete`), never delete+copy.
+  which every local rebuild violated when builds had no Team ID (`OS_REASON_CODESIGNING`,
+  then launchd drops the job).
+- `Scripts/build.sh install` updates the bundle in place (`rsync --delete`); `brew upgrade`
+  replaces it. Either way the agent restarts itself (see CI and releases).
 - XPC peers accepted by the agent must match our signing certificate + extension identifier.
   Peer connections don't inherit the listener's queue: set the target queue to main.
+
+## CI and releases (`.github/workflows`)
+
+- `validate`, on every PR. The main ruleset requires a PR (no direct pushes, no force
+  pushes) and its jobs: `check` (`Scripts/check.sh`, plus `zsh -n` on the zsh scripts),
+  `package` (a release dry run, ad-hoc signed, and `brew style` on the generated cask) and
+  `scripts` (shellcheck on the bash scripts, actionlint). Runner label `xcode-27`: GitHub's
+  macOS 27 arm64 image (images are named by Xcode major). Its default Xcode lags the SDK
+  the deployment target needs, so the workflows set `DEVELOPER_DIR` to the Xcode this
+  project builds with (27.2). CI's runners are slower and shared: `PEEP_SMOKE_BUDGET`
+  raises the hostile-input time budget there.
+- `review`: Claude reviews each PR (anthropics/claude-code-action).
+- `release`, on every push to main: version 0.0.N, N = commits on main (squash merges, so
+  every merge bumps it; `Scripts/build.sh` stamps it into both bundles with the git hash
+  as `PeepRevision`). `Scripts/release.sh` builds, signs, notarizes (API key), staples,
+  zips and writes the cask. With the Apple secrets it publishes GitHub release `v0.0.N`
+  and `Casks/peep.rb` in lingrino/homebrew-tap; without them it keeps the ad-hoc zip as a
+  run artifact only. Notarization can take ~40 min the first time: that's Apple.
+- Secrets come from Terraform in lingrino/infra (`secrets_github.tf`, `local.mac_app_repos`:
+  every Mac app the maintainer releases this way gets the same ones):
+  `HOMEBREW_TAP_GITHUB_TOKEN`, and from AWS Secrets Manager `github/keys/apple-developer`:
+  `APPLE_CERT_P12_BASE64`, `APPLE_CERT_PASSWORD` (Developer ID Application certificate),
+  `APPLE_API_KEY_P8_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID` (App Store Connect
+  API key for notarytool). Both belong to the team, not to Peep; fred's
+  `scripts/store-release-secrets.sh` stores a renewed certificate, then infra's next apply
+  hands it to every repo. Never create new ones or handle their values: ask the owner.
+  The repo (`terraform/github/repo_peep.tf`: ruleset, required checks, allowed actions) is
+  there too; the required checks must match `validate.yml`'s job names.
+- Upgrades: `brew upgrade` swaps /Applications/Peep.app under the running agent. The agent
+  watches the folder holding its bundle (FSEvents) and, once its executable is a different
+  file, ends the extension processes still running the old code (Quick Look reuses them)
+  and exits; launchd starts the new agent (KeepAlive). The cask's `postflight_steps` clears
+  the quarantine flag brew puts on each copy, like fred's. It has no `uninstall launchctl:`
+  (brew runs uninstall stanzas on every upgrade, and nothing would register the agent
+  again); `zap` removes the agent. A fresh install needs Peep.app opened once: that
+  registers the agent, which asks for Accessibility (the owner's to grant).
+- Renovate keeps action versions current (`renovate.json`).
+- The owner's Macs install Peep through their dotfiles (lingrino/dotfiles):
+  `cask 'lingrino/tap/peep'` in `home/exact_private_dot_config/private_homebrew/Brewfile_*`.
+  Their `dot` runs `brew bundle cleanup --force --zap` and `brew upgrade`: a merge to main
+  reaches each Mac on its next `dot`; `Scripts/build.sh install` replaces the release with a
+  local build until the next upgrade.
 
 ## Debugging
 

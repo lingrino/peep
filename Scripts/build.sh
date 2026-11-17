@@ -10,6 +10,19 @@
 #   CONFIG=debug Scripts/build.sh    # unoptimized build with debug info
 #   DIAG=1 Scripts/build.sh install  # extension diagnostics: main-thread stalls, when Quick Look
 #                                    # shows each preview, memory (Sources/Preview/Diag.swift)
+#
+# Version: 0.0.N, N = commits on HEAD (main is squash-merged, so every merge bumps N), in
+# both bundles; CFBundleVersion is N, PeepRevision the short git hash. PEEP_VERSION overrides.
+#
+# Signing identity, PEEP_SIGN_IDENTITY:
+#   unset  the Developer ID from the shared signing keychain (Scripts/setup-signing.sh), no
+#          timestamp: the same designated requirement as releases (bundle id + team ID), so
+#          the agent's Accessibility grant carries across brew-installed releases and local
+#          builds. Never ad-hoc or another identity locally: that means granting it again.
+#   "-"    ad-hoc: CI builds that are checked but never installed (and builds without the
+#          maintainer's certificate)
+#   other  that identity from the keychain search list, with a secure timestamp (releases:
+#          notarization requires it; Scripts/release.sh)
 set -euo pipefail
 
 ROOT=${0:A:h:h}
@@ -63,27 +76,40 @@ cp Bundle/PeepPreview-Info.plist "$APPEX/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 [[ -f Bundle/AppIcon.icns ]] && cp Bundle/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
+REV=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
+N=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+VERSION=${PEEP_VERSION:-0.0.$N}
+for plist in "$APP/Contents/Info.plist" "$APPEX/Contents/Info.plist"; do
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" -c "Set :CFBundleVersion $N" \
+    -c "Add :PeepRevision string $REV" "$plist"
+done
+
 # Release: strip local symbols (smaller binary = fewer pages to fault in at launch).
 if [[ "$CONFIG" == release ]]; then
   strip -x "$APP/Contents/MacOS/Peep" "$APPEX/Contents/MacOS/PeepPreview"
 fi
 
-# Sign with the stable local identity (Scripts/setup-signing.sh) so privacy permissions
-# survive rebuilds; fall back to ad-hoc. Inner bundle first.
-KC="$HOME/Library/Keychains/peep-signing.keychain-db"
-SIGN=(--sign -)
-if [[ -f "$KC" ]] && KCPW=$(security find-generic-password -s peep-signing-keychain -w 2>/dev/null); then
-  security unlock-keychain -p "$KCPW" "$KC"
-  SIGN=(--keychain "$KC" --sign "Peep Local Signing")
-else
-  echo "warning: no local signing identity; ad-hoc signing (run Scripts/setup-signing.sh)" >&2
-fi
+# Sign (see PEEP_SIGN_IDENTITY above), inner bundle first; hardened runtime (notarization).
+case "${PEEP_SIGN_IDENTITY:-}" in
+  "")
+    KC="$HOME/Library/Keychains/developer-id.keychain-db"   # Scripts/setup-signing.sh (same paths)
+    PASS_FILE="$HOME/Library/Application Support/DeveloperID/keychain-password"
+    [[ -f "$PASS_FILE" && -f "$KC" ]] || {
+      print -u2 "no Developer ID for local builds: run Scripts/setup-signing.sh (or PEEP_SIGN_IDENTITY=- for ad-hoc)"
+      exit 1
+    }
+    security unlock-keychain -p "$(<"$PASS_FILE")" "$KC"
+    ID=$(security find-identity -v -p codesigning "$KC" | awk '/"Developer ID Application: / { print $2; exit }')
+    [[ -n "$ID" ]] || { print -u2 "no valid Developer ID identity in $KC: run Scripts/setup-signing.sh"; exit 1 }
+    SIGN=(--timestamp=none --sign "$ID" --keychain "$KC") ;;
+  -)
+    SIGN=(--sign -) ;;
+  *)
+    SIGN=(--timestamp --sign "$PEEP_SIGN_IDENTITY") ;;
+esac
 codesign --force "${SIGN[@]}" --options runtime --entitlements Bundle/PeepPreview.entitlements "$APPEX"
 codesign --force "${SIGN[@]}" --options runtime --entitlements Bundle/Peep.entitlements "$APP"
-# Locked again between builds: while unlocked, any process could sign with the identity just
-# by running codesign (see README, Security and privacy).
-[[ -n "${KCPW:-}" ]] && security lock-keychain "$KC"
-echo "built $APP"
+echo "built $APP ($VERSION, $REV)"
 
 if [[ "${1:-}" == install ]]; then
   DEST=/Applications/Peep.app

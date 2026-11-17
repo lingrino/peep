@@ -1,0 +1,65 @@
+name: validate
+
+# Pre-merge checks; the main ruleset requires check, package and scripts. What needs Finder,
+# Quick Look, the installed app or its Accessibility grant (the Finder test, render
+# comparisons against a revision, Quick Look timing, benchmarks) stays local: AGENTS.md.
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: validate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+# The image's default Xcode is older than this Mac's and its SDK refuses the deployment
+# target; build with the same Xcode as local builds. Move with the local toolchain.
+env:
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+  PEEP_SIGN_IDENTITY: "-" # ad-hoc: CI builds are checked, never installed
+
+jobs:
+  check:
+    runs-on: xcode-27
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        run: |
+          sw_vers && xcodebuild -version && swiftc --version
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+      - name: zsh syntax
+        run: |
+          for f in Scripts/*.sh; do
+            if [[ "$(head -1 "$f")" == *zsh* ]]; then zsh -n "$f"; fi
+          done
+      - name: check
+        run: Scripts/check.sh
+        env:
+          PEEP_SMOKE_BUDGET: "5000" # shared runners: slower, and noisier
+      - name: logs
+        if: failure()
+        run: |
+          for f in .build/check/*.log; do echo "::group::$f"; tail -n 60 "$f"; echo "::endgroup::"; done
+
+  package:
+    runs-on: xcode-27
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the bundle version counts commits
+      - name: release dry run
+        run: Scripts/release.sh
+      - name: check cask
+        run: brew style --only-cops Cask .build/dist/peep.rb # outside a tap, only the cask rules apply
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        run: shellcheck Scripts/release.sh Scripts/setup-signing.sh # the rest are zsh: `check` runs zsh -n
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
