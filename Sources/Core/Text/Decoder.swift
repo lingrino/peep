@@ -16,7 +16,11 @@ public enum Decoder {
     /// How much of the head of the file to inspect for NUL bytes when sniffing binaries.
     static let sniffBytes = 64 * 1024
 
-    public static func decode(_ raw: TextBuffer, truncated: Bool = false) -> DecodeResult {
+    /// Loads cut short must end (and start) on a character boundary: see `completeEnd` and
+    /// `continuationBytes`, which the loaders apply. An incomplete sequence left at either end
+    /// counts as invalid here (it used to be accepted at the end of truncated loads, and the
+    /// renderer, which relies on valid UTF-8, crashed on it).
+    public static func decode(_ raw: TextBuffer) -> DecodeResult {
         let p = UnsafePointer(raw.base)
         let n = raw.count
 
@@ -35,7 +39,7 @@ public enum Decoder {
         }
         if n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF {
             let body = UnsafeRawBufferPointer(start: p + 3, count: n - 3)
-            switch validateUTF8(p + 3, n - 3, truncated: truncated) {
+            switch validateUTF8(p + 3, n - 3) {
             case .valid: return .text(TextBuffer(copying: body), .utf8BOM, repaired: false)
             case .invalid: return .text(repairUTF8(p + 3, n - 3), .utf8BOM, repaired: true)
             }
@@ -50,7 +54,7 @@ public enum Decoder {
             return .binary
         }
 
-        switch validateUTF8(p, n, truncated: truncated) {
+        switch validateUTF8(p, n) {
         case .valid:
             return .text(raw, .utf8, repaired: false)
         case .invalid(let bad):
@@ -66,8 +70,7 @@ public enum Decoder {
     enum Validity { case valid, invalid(Int) }
 
     /// Validates UTF-8. Counts invalid sequences (capped) so callers can pick a fallback.
-    /// When `truncated`, an incomplete sequence at the very end is not an error.
-    static func validateUTF8(_ p: UnsafePointer<UInt8>, _ n: Int, truncated: Bool) -> Validity {
+    static func validateUTF8(_ p: UnsafePointer<UInt8>, _ n: Int) -> Validity {
         var i = 0
         var bad = 0
         while i < n {
@@ -81,9 +84,9 @@ public enum Decoder {
             if m == 0 { i &+= 16; continue }
             i &+= m.trailingZeroBitCount >> 2
             if i >= n { break }
+            // An incomplete sequence at the end reads the zero padding: length 0, invalid.
             let len = sequenceLength(p + i)
             if len == 0 {
-                if truncated && n - i < 4 && isIncompletePrefix(p + i, n - i) { break }
                 bad &+= 1
                 if bad > 1 << 20 { return .invalid(bad) }
                 i &+= 1
@@ -116,12 +119,29 @@ public enum Decoder {
         return 0
     }
 
-    static func isIncompletePrefix(_ s: UnsafePointer<UInt8>, _ avail: Int) -> Bool {
-        let b0 = s[0]
-        let need = b0 >= 0xF0 ? 4 : b0 >= 0xE0 ? 3 : b0 >= 0xC2 ? 2 : 0
-        if need == 0 || avail >= need { return false }
-        for k in 1..<avail where s[k] & 0xC0 != 0x80 { return false }
-        return true
+    /// Length of `p[0..<n]` without the incomplete sequence a cut in the middle of a character
+    /// leaves at its end (a lead byte followed by fewer continuation bytes than it announces).
+    /// For loads cut short: limits and time budgets fall anywhere. Anything else invalid is
+    /// left for validation. Looks at the last 3 bytes only.
+    static func completeEnd(_ p: UnsafePointer<UInt8>, _ n: Int) -> Int {
+        var k = 1
+        while k <= min(3, n) {
+            let b = p[n &- k]
+            if b & 0xC0 != 0x80 {   // ASCII or a lead byte
+                let need = b >= 0xF0 ? 4 : b >= 0xE0 ? 3 : b >= 0xC0 ? 2 : 1
+                return need > k ? n &- k : n
+            }
+            k &+= 1
+        }
+        return n
+    }
+
+    /// Continuation bytes at the start of `p[0..<n]` (at most 3): the tail of a character a
+    /// load starting in the middle of the file (log tails) cut in two.
+    static func continuationBytes(_ p: UnsafePointer<UInt8>, _ n: Int) -> Int {
+        var k = 0
+        while k < min(3, n) && p[k] & 0xC0 == 0x80 { k &+= 1 }
+        return k
     }
 
     /// Copies UTF-8, replacing each invalid byte with U+FFFD.

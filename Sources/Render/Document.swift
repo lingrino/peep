@@ -66,7 +66,7 @@ public final class Document {
         if SQLitePreview.isSQLite(file.raw.base, file.raw.count) && compressedNotice == nil && file.offset == 0 {
             return openSQLite(path: path, name: name)
         }
-        let decoded = Decoder.decode(file.raw, truncated: file.truncated)
+        let decoded = Decoder.decode(file.raw)
         mark("decode")
         var text: TextBuffer
         var lang: Language
@@ -95,20 +95,34 @@ public final class Document {
         // line-structured are left alone).
         var formatted = false
         var unformatted: TextBuffer?   // set when only a prefix was formatted (rest in background)
+        var prefixInput = 0            // input bytes behind that prefix
         if lang == .json && !Document.noReformat.contains((path as NSString).pathExtension.lowercased())
             && JSONFormatter.looksMinified(text) {
             formatted = true
-            if text.count > progressiveThreshold {
+            let n = text.count
+            if n > progressiveThreshold {
                 // First screens now; the whole file in the background (formatting runs at
-                // ~0.9 GB/s: 72 ms for 64 MB is too long to wait for). Cut after a comma.
-                var cut = min(text.count, progressivePrefix)
+                // ~0.9 GB/s: 72 ms for 64 MB is too long to wait for). Cut after a comma, else
+                // between characters (a character cut in two is invalid UTF-8).
+                var cut = min(n, progressivePrefix)
                 var c = cut
                 while c > cut - 4096 && c > 1 && text.base[c - 1] != 0x2C { c -= 1 }
-                if text.base[c - 1] == 0x2C { cut = c }
+                cut = text.base[c - 1] == 0x2C ? c : Decoder.completeEnd(text.base, cut)
+                // The output is capped too (re-indenting grows text up to 82x), so the prefix
+                // can be lexed whole, now.
+                let f = JSONFormatter.format(text, count: cut, outputLimit: progressiveThreshold)
                 unformatted = text
-                text = JSONFormatter.format(text, count: cut)
+                prefixInput = f.consumed
+                text = f.text
             } else {
-                text = JSONFormatter.format(text)
+                // Small files whole, now, unless they grow past `formatNowLimit`: then what
+                // was formatted is the prefix, as for big files.
+                let f = JSONFormatter.format(text, count: n, outputLimit: formatNowLimit)
+                if f.consumed < n {
+                    unformatted = text
+                    prefixInput = f.consumed
+                }
+                text = f.text
             }
             mark("format")
         }
@@ -134,11 +148,12 @@ public final class Document {
         let lines = LineIndex(text)
         mark("lines")
         if let raw = unformatted {
-            // Prefix is under the progressive threshold: lex it whole, now.
+            // The prefix is `formatNowLimit` bytes at most (give or take what one
+            // `JSONFormatter.slice` of input becomes): lex it whole, now.
             let tokens = TokenStream(expectedBytes: text.count)
             lang.lex(text.base, 0, text.count, tokens)
             mark("lex")
-            let estimate = lines.count * (raw.count / max(1, text.count) + 1) * 2
+            let estimate = min(lines.count * (raw.count / max(1, prefixInput) + 1) * 2, formatLimit / 2)
             let content = CodeContent(text: text, lines: lines, tokens: tokens, language: lang, typography: typography,
                                       lineNumbers: true, lineCountHint: estimate)
             let doc = Document(kind: .code(lang), content: content, fileSize: file.fileSize, truncated: file.truncated)
@@ -146,16 +161,29 @@ public final class Document {
             doc.path = path
             doc.notice = notice
             let lang = lang
-            DispatchQueue.global(qos: .userInitiated).async {
+            let maxOut = formatLimit, limit = byteCount(maxOut)
+            let note = "\u{22EF} formatting stopped here: \(limit) of formatted text is the limit; the rest of the file isn't shown"
+            let cappedNotice = (notice.map { $0 + " · " } ?? "") + "first \(limit) of the formatted text"
+            // Weak: when the preview moves on, its document goes away and formatting stops
+            // (strong references kept seconds of work and gigabytes alive per preview).
+            DispatchQueue.global(qos: .userInitiated).async { [weak doc, weak content] in
                 let t0 = nanotime()
-                let full = JSONFormatter.format(raw)
+                let f = JSONFormatter.format(raw, count: raw.count, outputLimit: maxOut, stopNote: note,
+                                             cancelled: { doc == nil })
+                if doc == nil { return }
+                let full = f.text
                 let fullLines = LineIndex(full)
                 let fullTokens = TokenStream(expectedBytes: full.count)
-                lang.lex(full.base, 0, full.count, fullTokens)
+                lang.lex(full.base, 0, f.noteStart, fullTokens)
+                fullTokens.add(f.noteStart, full.count, .comment)
                 let ns = nanotime() - t0
+                let stopped = f.consumed < raw.count
                 DispatchQueue.main.async {
+                    guard let doc, let content else { return }
                     content.replace(text: full, lines: fullLines, tokens: fullTokens)
                     doc.timings.append(("format-bg", ns))
+                    // (The pill is shown when the document is; this is for any later show.)
+                    if stopped { doc.notice = cappedNotice }
                     doc.onContentReplaced?()
                 }
             }
@@ -197,6 +225,15 @@ public final class Document {
     /// it has (the notice says it's the first part).
     static let decompressBudget: UInt64 = 40_000_000
 
+    /// Formatted JSON made on the main thread at most (a small file whole, or a big file's
+    /// prefix): ~4 ms. Typical minified JSON grows 2-4x, so files up to the progressive
+    /// threshold are still formatted whole, now; deep nesting grows up to 82x.
+    static let formatNowLimit = 4 << 20
+    /// Formatted JSON at most (background): 4x the largest file loaded, so ordinary files
+    /// are never cut, while 64 MB of brackets no longer becomes 5.5 GB of text (12 GB of
+    /// memory, line and token offsets past UInt32). The text ends with a line saying so.
+    static let formatLimit = maxBytes * 4
+
     static func openSQLite(path: String, name: String) -> Document {
         let t0 = nanotime()
         let (md, notice) = SQLitePreview.markdown(path: path, name: name)
@@ -219,17 +256,24 @@ public final class Document {
         let t0 = nanotime()
         let listing = ArchiveReader.list(path: path, kind: kind, budgetNanos: 25_000_000)
         let t1 = nanotime()
-        // Rendering (folder tree, sort) is ~0.2 µs per entry: huge listings render off the
-        // first frame, which shows a one-line placeholder.
-        let deferRender = listing.complete && listing.count > 25_000
-        var shown = listing
+        // Rendering (folder tree, sort) is ~0.2 µs per line and linear in the name bytes:
+        // huge listings render off the first frame, which shows a one-line placeholder. The
+        // entry count doesn't bound the lines (60 entries with 64 KB names implied 2 million
+        // folders: 0.56 s on the main thread), so the render also gives up past
+        // `renderNowLines`.
+        var rendered: (TextBuffer, TokenStream)?
+        if listing.count <= renderNowEntries && listing.nameBytes <= renderNowNameBytes {
+            rendered = listing.render(title: name, lineBudget: renderNowLines)
+        }
+        let deferRender = rendered == nil
         if deferRender {
-            shown = ArchiveListing(kind: kind)
+            let shown = ArchiveListing(kind: kind)
             shown.fileSize = listing.fileSize
             shown.pendingEntries = listing.count
             shown.complete = false
+            rendered = shown.render(title: name)
         }
-        let (text, tokens) = shown.render(title: name)
+        let (text, tokens) = rendered!
         let lines = LineIndex(text)
         let t2 = nanotime()
         let content = CodeContent(text: text, lines: lines, tokens: tokens, language: .plain, typography: typography,
@@ -238,13 +282,18 @@ public final class Document {
         doc.timings = [("list", t1 - t0), ("render", t2 - t1)]
         doc.path = path
         if !listing.complete || deferRender {
-            DispatchQueue.global(qos: .userInitiated).async {
+            // Weak: the listing stops when the preview moves on and its document goes away
+            // (decoding a big tar.xz takes many seconds).
+            DispatchQueue.global(qos: .userInitiated).async { [weak doc, weak content] in
                 let t0 = nanotime()
-                let full = deferRender ? listing : ArchiveReader.list(path: path, kind: kind, budgetNanos: 0)
-                let (t, k) = full.render(title: name)
+                let full = listing.complete ? listing
+                    : ArchiveReader.list(path: path, kind: kind, budgetNanos: 0, cancelled: { doc == nil })
+                if doc == nil { return }
+                guard let (t, k) = full.render(title: name) else { return }
                 let li = LineIndex(t)
                 let ns = nanotime() - t0
                 DispatchQueue.main.async {
+                    guard let doc, let content else { return }
                     content.replace(text: t, lines: li, tokens: k)
                     doc.timings.append(("list-bg", ns))
                     doc.onContentReplaced?()
@@ -253,6 +302,12 @@ public final class Document {
         }
         return doc
     }
+
+    /// Listings rendered on the main thread at most: entries, name bytes (25k typical
+    /// paths), and lines (files plus folders; real archives have a folder per few files).
+    static let renderNowEntries = 25_000
+    static let renderNowNameBytes = 4 << 20
+    static let renderNowLines = 50_000
 
     /// JSON-family extensions never re-indented: comments (jsonc, json5, editor settings) or
     /// one document per line (jsonl, ndjson).

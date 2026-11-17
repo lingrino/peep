@@ -80,20 +80,28 @@ public enum FileLoader {
     ///
     /// `tail`: when the file is larger than `limit`, read its *end* instead (logs), starting
     /// at the first line that begins within the last `limit` bytes.
+    ///
+    /// A load cut short starts and ends on a UTF-8 character boundary (for text that is
+    /// UTF-8): the renderer relies on valid UTF-8, and a character cut in two at either end
+    /// would not be. At most 3 bytes are dropped at each end.
     public static func load(path: String, limit: Int, tail: Bool = false) throws(LoadError) -> LoadedFile {
         let fd = open(path, O_RDONLY | O_CLOEXEC)
         if fd < 0 { throw .open(errno) }
         defer { close(fd) }
         var st = stat()
         if fstat(fd, &st) != 0 { throw .open(errno) }
-        let size = Int(st.st_size)
+        let size = max(0, Int(st.st_size))
         var start = 0
         if tail && size > limit {
             start = size - limit
-            // Begin at a line start: probe a little and skip the partial first line.
+            // Begin at a line start: probe a little and skip the partial first line (or, with
+            // no newline nearby, the rest of a character cut in two).
             var probe = [UInt8](repeating: 0, count: 64 << 10)
             let n = probe.withUnsafeMutableBytes { pread(fd, $0.baseAddress, $0.count, off_t(start)) }
-            if n > 0, let nl = probe[0..<n].firstIndex(of: 0x0A) { start += nl + 1 }
+            if n > 0 {
+                if let nl = probe[0..<n].firstIndex(of: 0x0A) { start += nl + 1 }
+                else { start += probe.withUnsafeBufferPointer { Decoder.continuationBytes($0.baseAddress!, n) } }
+            }
         }
         let want = min(size - start, limit)
         let p = TextBuffer.allocate(want)
@@ -108,8 +116,9 @@ public enum FileLoader {
             if n == 0 { break }
             got += n
         }
-        if got < want { (p + got).initialize(repeating: 0, count: TextBuffer.padding) }
-        var f = LoadedFile(raw: TextBuffer(owning: p, count: got), fileSize: size)
+        let end = start + got < size ? Decoder.completeEnd(p, got) : got   // cut short
+        if end < want { (p + end).initialize(repeating: 0, count: TextBuffer.padding) }
+        var f = LoadedFile(raw: TextBuffer(owning: p, count: end), fileSize: size)
         f.offset = start
         return f
     }

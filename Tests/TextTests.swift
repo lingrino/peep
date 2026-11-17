@@ -74,7 +74,7 @@ let textTests: [Test] = [
     Test("decode: utf8 validation edge cases") {
         func valid(_ b: [UInt8]) -> Bool {
             let t = b.withUnsafeBytes { TextBuffer(copying: $0) }
-            if case .valid = Decoder.validateUTF8(t.base, t.count, truncated: false) { return true }
+            if case .valid = Decoder.validateUTF8(t.base, t.count) { return true }
             return false
         }
         expect(valid([0xE2, 0x82, 0xAC]))
@@ -83,6 +83,36 @@ let textTests: [Test] = [
         expect(!valid([0xF4, 0x90, 0x80, 0x80])) // > U+10FFFF
         expect(!valid([0xE2, 0x82]))           // truncated
         expect(valid(Array(String(repeating: "aé€😀", count: 100).utf8)))
+    },
+    Test("decode: loads cut short end and start between characters") {
+        func end(_ b: [UInt8]) -> Int { b.withUnsafeBufferPointer { Decoder.completeEnd($0.baseAddress!, b.count) } }
+        expectEqual(end([0x61, 0xE2, 0x82, 0xAC]), 4)
+        expectEqual(end([0x61, 0xE2, 0x82]), 1)
+        expectEqual(end([0x61, 0xE2]), 1)
+        expectEqual(end([0xF0, 0x9F, 0x98]), 0)
+        expectEqual(end([0xF0, 0x9F, 0x98, 0x80]), 4)
+        expectEqual(end([0x61, 0xC3]), 1)
+        expectEqual(end([0x80, 0x80, 0x80, 0x80]), 4)   // not a cut character: left to validation
+        func lead(_ b: [UInt8]) -> Int { b.withUnsafeBufferPointer { Decoder.continuationBytes($0.baseAddress!, b.count) } }
+        expectEqual(lead([0x82, 0xAC, 0x61]), 2)
+        expectEqual(lead([0x61, 0x80]), 0)
+        expectEqual(lead([0x80, 0x80, 0x80, 0x80]), 3)
+        // An incomplete sequence at the end is invalid (it passed as valid in truncated loads,
+        // and the renderer crashed on it).
+        let t = ([0x61, 0xE2, 0x82] as [UInt8]).withUnsafeBytes { TextBuffer(copying: $0) }
+        if case .valid = Decoder.validateUTF8(t.base, t.count) { expect(false) }
+        // FileLoader: limits inside a character, tail loads starting inside one (no newline).
+        let path = tempFile(Array(String(repeating: "€", count: 3000).utf8), suffix: ".log")
+        defer { removeFile(path) }
+        for limit in [1000, 1001, 1002, 4000] {
+            for tail in [false, true] {
+                let f = try! FileLoader.load(path: path, limit: limit, tail: tail)
+                expect(f.raw.count >= limit - 2 && f.raw.count % 3 == 0, "\(limit) \(tail): \(f.raw.count)")
+                expect(f.truncated)
+                guard case .text(let d, .utf8, false) = Decoder.decode(f.raw) else { expect(false); continue }
+                expect(d === f.raw)   // valid as loaded: no repair copy
+            }
+        }
     },
 ]
 
@@ -149,5 +179,29 @@ let searchTests: [Test] = [
         expect(f(deep).utf8.count < 40_000)   // indentation is capped (uncapped: ~80 KB)
         expect(JSONFormatter.looksMinified(TextBuffer(String(repeating: #"{"k":"value"},"#, count: 100))))
         expect(!JSONFormatter.looksMinified(TextBuffer(String(repeating: "{\n  \"k\": 1\n},\n", count: 100))))
+    },
+    Test("json: output limit, stop note, cancellation") {
+        // Brackets grow 82x: stopped near the limit, at a token boundary.
+        let deep = TextBuffer(String(repeating: "[", count: 100_000))
+        let f = JSONFormatter.format(deep, count: deep.count, outputLimit: 1_000_000, stopNote: "stopped")
+        expect(f.consumed >= 12_000 && f.consumed < deep.count && f.consumed % JSONFormatter.slice == 0)
+        expect(f.noteStart >= 1_000_000 && f.noteStart < 1_000_000 + 82 * JSONFormatter.slice + 100)   // over by < one slice
+        expectEqual(f.text.string(f.noteStart, f.text.count), "stopped\n")
+        let all = JSONFormatter.format(deep)   // what was formatted is the full output's beginning
+        expectEqual(all.string(0, f.noteStart - 1), f.text.string(0, f.noteStart - 1))
+        // Under the limit: everything, no note.
+        let small = TextBuffer(#"{"a":[1,2],"b":"x"}"#)
+        let g = JSONFormatter.format(small, count: small.count, outputLimit: 1 << 20, stopNote: "x")
+        expectEqual(g.consumed, small.count)
+        expectEqual(g.noteStart, g.text.count)
+        expectEqual(g.text.string(0, g.text.count), JSONFormatter.format(small).string(0, JSONFormatter.format(small).count))
+        // Cancelled: stops at the first poll (every `checkInterval` bytes of output), no note.
+        nonisolated(unsafe) var polls = 0
+        let big = TextBuffer(String(repeating: "[1,2,3],", count: 400_000))
+        let h = JSONFormatter.format(big, count: big.count, outputLimit: .max, stopNote: "x", cancelled: { polls += 1; return true })
+        expectEqual(polls, 1)
+        expect(h.consumed < big.count)
+        expectEqual(h.noteStart, h.text.count)
+        expect(h.text.count >= JSONFormatter.checkInterval && h.text.count < JSONFormatter.checkInterval + 82 * JSONFormatter.slice)
     },
 ]

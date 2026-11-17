@@ -2,7 +2,7 @@ import _Builtin_intrinsics.arm.neon
 
 // Small SIMD vocabulary shared by the scanners.
 //
-// Codegen notes (verified with `swiftc -O -emit-assembly`, see Scripts/asm.sh):
+// Codegen notes (verified with `swiftc -O -emit-assembly`; Scripts/profile.py finds hot spots):
 //  - `nibbles(_:)` lowers to exactly `cmeq` + `shrn #4` + `fmov`: the NEON replacement for
 //    x86 movemask. Each input lane becomes 4 bits of the UInt64.
 //  - Do NOT use `any()`, `min()`, `max()` or `wrappedSum()` on SIMD values in hot loops: they

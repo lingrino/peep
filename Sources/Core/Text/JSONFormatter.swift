@@ -26,6 +26,8 @@ public enum JSONFormatter {
     }
 
     /// Indentation stops growing here, so pathological nesting can't blow up the output.
+    /// It still grows it: every `[` `{` `,` at depth 40+ becomes 82 bytes, so callers bound
+    /// the output (`outputLimit`).
     static let maxIndentDepth = 40
 
     public static func format(_ t: TextBuffer) -> TextBuffer { format(t, count: t.count) }
@@ -33,17 +35,72 @@ public enum JSONFormatter {
     /// Formats the first `n` bytes (a prefix cut anywhere is fine: output up to the cut equals
     /// the full output's beginning, except possibly its last line).
     public static func format(_ t: TextBuffer, count n: Int) -> TextBuffer {
-        let p = UnsafePointer(t.base)
-        var out = ByteOutput(capacity: n + n / 2 + 4096)
+        format(t, count: n, outputLimit: .max).text
+    }
+
+    public struct Formatted {
+        public let text: TextBuffer
+        /// Input bytes formatted: fewer than asked when the output limit (or cancellation)
+        /// stopped formatting, always at a token boundary.
+        public let consumed: Int
+        /// Where `stopNote` starts in `text` (`text.count` when there is none).
+        public let noteStart: Int
+    }
+
+    /// Bytes of output between `cancelled` checks (~1 ms of formatting).
+    static let checkInterval = 1 << 20
+    /// Input formatted between checks of the output size: at most 82x this past the limit.
+    static let slice = 4096
+
+    /// Formats the first `n` bytes, stopping at a token boundary once the output reaches
+    /// `outputLimit` bytes (it can exceed it by what one `slice` of input becomes, plus a
+    /// token: a string or scalar is copied whole). A stop at the limit appends a line with
+    /// `stopNote` (when not empty). `cancelled` is polled every `checkInterval` bytes of
+    /// output (background formatting of a big file stops when its preview goes away).
+    ///
+    /// The checks run between slices of input, and the per-token loop is a function of its
+    /// own: checks in it (even one compare per token), or the loop inline in this function,
+    /// made formatting 3-9% slower.
+    public static func format(_ t: TextBuffer, count n: Int, outputLimit: Int, stopNote: String = "",
+                              cancelled: () -> Bool = { false }) -> Formatted {
+        var s = State(out: ByteOutput(capacity: min(n + n / 2, outputLimit) + 4096))
+        var poll = checkInterval
+        var atLimit = false
+        while s.i < n {
+            if s.out.count >= outputLimit { atLimit = true; break }
+            if s.out.count >= poll {
+                if cancelled() { break }
+                poll = s.out.count + checkInterval
+            }
+            run(UnsafePointer(t.base), n, min(n, s.i &+ slice), &s)
+        }
+        s.out.byte(0x0A)
+        let noteStart = s.out.count
+        if atLimit && !stopNote.isEmpty {
+            s.out.string(stopNote)
+            s.out.byte(0x0A)
+        }
+        return Formatted(text: s.out.finish(), consumed: min(s.i, n), noteStart: noteStart)
+    }
+
+    struct State {
+        var out: ByteOutput
+        var i = 0
         var depth = 0
         var afterTopValue = false   // a complete value at depth 0 was written
-        var i = 0
+    }
+
+    /// Formats the tokens starting before `end` (each runs to its own end, up to `n`).
+    @inline(never)
+    static func run(_ p: UnsafePointer<UInt8>, _ n: Int, _ end: Int, _ state: inout State) {
+        var out = state.out, i = state.i, depth = state.depth, afterTopValue = state.afterTopValue
+        defer { state = State(out: out, i: i, depth: depth, afterTopValue: afterTopValue) }
         @inline(__always) func beginValue() {
             if depth == 0 {
                 if afterTopValue { out.byte(0x0A) }
             }
         }
-        while i < n {
+        while i < end {
             let c = p[i]
             switch c {
             case 0x20, 0x09, 0x0A, 0x0D:
@@ -104,7 +161,5 @@ public enum JSONFormatter {
                 if depth == 0 { afterTopValue = true }
             }
         }
-        out.byte(0x0A)
-        return out.finish()
     }
 }
