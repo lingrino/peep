@@ -52,8 +52,11 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
         super.viewDidDisappear()
         visible = false
         report()
-        AgentClient.shared.unregister(agentID)
     }
+
+    // Registered for the controller's life, not until it disappears: one that disappears and
+    // appears again (Finder's column pane) kept reporting state but lost its keys.
+    isolated deinit { AgentClient.shared.unregister(agentID) }
 
     override func viewDidLayout() {
         super.viewDidLayout()
@@ -120,7 +123,9 @@ final class PreviewViewController: NSViewController, @preconcurrency QLPreviewin
         preview.displayIfNeeded()
         handler(nil)
         let ms = Double(nanotime() - t0) / 1e6
-        log.notice("prepare \(url.lastPathComponent, privacy: .public): \(doc.timingSummary, privacy: .public) | total \(ms, format: .fixed(precision: 2))ms")
+        // Info level: kept in memory for `log stream --level info`, not persisted to disk (file
+        // names are the user's business).
+        log.info("prepare \(url.lastPathComponent, privacy: .public): \(doc.timingSummary, privacy: .public) | total \(ms, format: .fixed(precision: 2))ms")
         if PreviewViewController.firstPrepare {
             // Cold start: how long the process existed before our first preview began.
             PreviewViewController.firstPrepare = false

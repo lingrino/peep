@@ -188,10 +188,11 @@ final class TitleButton {
 
     private static func pick(_ paths: [String], _ name: String) -> String? {
         if name.isEmpty { return paths.count == 1 ? paths[0] : nil }
-        return paths.first {
-            let last = ($0 as NSString).lastPathComponent
-            return last == name || (last as NSString).deletingPathExtension == name   // extension hidden
-        }
+        if let p = paths.first(where: { ($0 as NSString).lastPathComponent == name }) { return p }
+        // Extension hidden in the title: only when one selected file fits (notes.md and
+        // notes.txt both selected would be a guess).
+        let fits = paths.filter { (($0 as NSString).lastPathComponent as NSString).deletingPathExtension == name }
+        return fits.count == 1 ? fits[0] : nil
     }
 
     /// Paths of the selected items of every list, outline or browser under `e`.

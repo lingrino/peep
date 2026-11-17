@@ -50,11 +50,10 @@ final class AgentCore {
     }
 
     private var listener: xpc_connection_t?
-    nonisolated static let session: URLSession = {
-        let c = URLSessionConfiguration.ephemeral
-        c.httpMaximumConnectionsPerHost = 6
-        return URLSession(configuration: c)
-    }()
+    /// nanotime of the last left mouse-down in a Quick Look panel showing a Peep preview (or of
+    /// the mouse-up ending that press): links open only right after one.
+    private var lastPanelClick: UInt64 = 0
+    private var pressInPanel = false
     private var previews: [Preview] = []
     private var tap: CFMachPort?
     private var panelCache: (pid: pid_t, at: UInt64, rect: CGRect?) = (0, 0, nil)
@@ -63,6 +62,11 @@ final class AgentCore {
     private(set) var finderFront = false
 
     func start() {
+        // Accessibility calls (the copy-path button's) are served on the target app's main
+        // thread and wait up to 6 s by default when it is busy; they run on this thread, which
+        // also serves the event tap, so every keystroke system-wide would wait with them. Cap
+        // them process-wide (the system-wide element's timeout is the default for all).
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.25)
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         Agent.log.notice("agent start trusted=\(AXIsProcessTrustedWithOptions(opts))")
         finderFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder"
@@ -92,8 +96,12 @@ final class AgentCore {
     }
 
     private func accept(_ peer: xpc_connection_t, requirement: String) {
-        // Only our own extension (same signing certificate) may connect.
-        _ = requirement.withCString { xpc_connection_set_peer_code_signing_requirement(peer, $0) }
+        // Only our own extension (same signing certificate) may connect; fail closed.
+        guard requirement.withCString({ xpc_connection_set_peer_code_signing_requirement(peer, $0) }) == 0 else {
+            Agent.log.error("peer requirement not set; connection refused")
+            xpc_connection_cancel(peer)
+            return
+        }
         // Peers don't inherit the listener's queue; everything here assumes the main thread.
         xpc_connection_set_target_queue(peer, DispatchQueue.main)
         xpc_connection_set_event_handler(peer) { msg in
@@ -127,24 +135,24 @@ final class AgentCore {
             }
             titleButton.soon()
         case "fetch":
-            guard let s = xpc_dictionary_get_string(msg, "url"), let url = URL(string: String(cString: s)),
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-                  let reply = xpc_dictionary_create_reply(msg) else { return }
+            guard let s = xpc_dictionary_get_string(msg, "url"), let reply = xpc_dictionary_create_reply(msg) else { return }
             nonisolated(unsafe) let r = reply
             nonisolated(unsafe) let peerConn = peer
-            var req = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 15)
-            req.setValue("Peep (Quick Look)", forHTTPHeaderField: "User-Agent")
-            AgentCore.session.dataTask(with: req) { data, resp, _ in
-                let ok = (resp as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
-                if ok, let data, data.count <= 25 << 20 {
-                    data.withUnsafeBytes { xpc_dictionary_set_data(r, "data", $0.baseAddress!, data.count) }
-                }
+            guard let url = URL(string: String(cString: s)) else { xpc_connection_send_message(peer, r); return }
+            RemoteFetch.shared.fetch(url) { data in   // policy and limits: see RemoteFetch
+                if let data { data.withUnsafeBytes { xpc_dictionary_set_data(r, "data", $0.baseAddress!, data.count) } }
                 xpc_connection_send_message(peerConn, r)
-            }.resume()
+            }
         case "open":
-            if let s = xpc_dictionary_get_string(msg, "url"), let url = URL(string: String(cString: s)),
-               ["http", "https", "mailto", "file"].contains(url.scheme?.lowercased() ?? "") {
-                NSWorkspace.shared.open(url)
+            // Only right after a click in the panel: the extension handles untrusted documents,
+            // and opening is the one thing it can ask for that acts outside a preview.
+            guard nanotime() &- lastPanelClick < 3_000_000_000 else {
+                Agent.log.notice("open refused: no recent click in the Quick Look panel")
+                return
+            }
+            lastPanelClick = 0   // one click, one link
+            if let s = xpc_dictionary_get_string(msg, "url"), let url = URL(string: String(cString: s)) {
+                LinkPolicy.open(url)
             }
         default:
             break
@@ -206,12 +214,21 @@ final class AgentCore {
         // In Finder a key or click may open, close or move the Quick Look panel to another
         // file, whatever previewer shows it (Peep's previews also report their state).
         if finderFront && (type == .keyDown || type == .leftMouseUp) { titleButton.soon() }
-        if previews.isEmpty || type == .leftMouseUp { return Unmanaged.passUnretained(event) }
+        if previews.isEmpty { return Unmanaged.passUnretained(event) }
+        if type == .leftMouseUp {
+            // A press that began in the panel ends here: links open on mouse-up, ~0.5 s later
+            // in the extension, however long the press was.
+            if pressInPanel { lastPanelClick = nanotime(); pressInPanel = false }
+            return Unmanaged.passUnretained(event)
+        }
         if type == .leftMouseDown {
+            pressInPanel = false
             if event.getIntegerValueField(.mouseEventClickState) == 1 { forwardClick(event) }
             return Unmanaged.passUnretained(event)   // never consumed: Quick Look still delivers it (late)
         }
         if type != .keyDown { return Unmanaged.passUnretained(event) }
+        // Most keys can't be intercepted: skip the window-list query (~0.2 ms) for them.
+        if !event.flags.contains(.maskCommand) && !previews.contains(where: \.find) { return Unmanaged.passUnretained(event) }
         let t = target()
         if event.flags.contains(.maskCommand) {
             // Debug aid (no characters are ever logged): why a ⌘-key was or wasn't taken.
@@ -260,14 +277,15 @@ final class AgentCore {
             panelCache = (front, now, quickLookPanel(of: front))
         }
         guard let panel = panelCache.rect else { return nil }
-        // The preview whose size best matches the panel (the panel adds a title bar).
+        // The preview whose size best matches the panel (the panel adds a title bar); every
+        // preview asks for the same size, so ties are normal: the most recently updated wins.
         var best: Preview?
         var bestScore = CGFloat.infinity
         for p in previews where p.visible {
             let dw = abs(p.size.width - panel.width), dh = abs(p.size.height - panel.height)
             if dw > 60 || dh > 120 { continue }
-            let score = dw + dh - CGFloat(p.seen % 1000) * 1e-9
-            if score < bestScore { bestScore = score; best = p }
+            let score = dw + dh
+            if score < bestScore || (score == bestScore && p.seen > best!.seen) { bestScore = score; best = p }
         }
         return best
     }
@@ -291,6 +309,8 @@ final class AgentCore {
     private func forwardClick(_ e: CGEvent) {
         guard let p = target(), let panel = panelCache.rect, panel.contains(e.location),
               let ts = NSEvent(cgEvent: e)?.timestamp else { return }
+        lastPanelClick = nanotime()
+        pressInPanel = true
         let msg = xpc_dictionary_create(nil, nil, 0)
         xpc_dictionary_set_string(msg, "t", "click")
         xpc_dictionary_set_uint64(msg, "id", p.id)

@@ -1,4 +1,5 @@
 import AppKit
+import Security
 @preconcurrency import XPC
 
 /// The extension's side of the keyboard agent protocol (see Sources/App/Agent.swift).
@@ -72,9 +73,26 @@ final class AgentClient {
         xpc_connection_send_message(connection(), m)
     }
 
+    /// The agent must be ours (it gets the paths of previewed files and the links clicked):
+    /// our designated requirement with the app's identifier, i.e. the same certificate. Ad-hoc
+    /// builds have no certificate: the identifier alone. Mirrors the agent's check of us.
+    private static let agentRequirement: String = {
+        let ours = "identifier \"com.lingrino.peep.preview\"", agent = "identifier \"com.lingrino.peep\""
+        var code: SecCode?, staticCode: SecStaticCode?, req: SecRequirement?, str: CFString?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopyDesignatedRequirement(staticCode, [], &req) == errSecSuccess, let req,
+              SecRequirementCopyString(req, [], &str) == errSecSuccess, let s = str as String?,
+              s.contains("certificate"), s.contains(ours) else { return agent }
+        return s.replacingOccurrences(of: ours, with: agent)
+    }()
+
     private func connection() -> xpc_connection_t {
         if let conn { return conn }
         let c = xpc_connection_create_mach_service(AgentClient.service, DispatchQueue.main, 0)
+        if AgentClient.agentRequirement.withCString({ xpc_connection_set_peer_code_signing_requirement(c, $0) }) != 0 {
+            log.error("agent requirement not set")
+        }
         xpc_connection_set_event_handler(c) { msg in
             MainActor.assumeIsolated { AgentClient.shared.received(msg) }
         }

@@ -122,7 +122,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openedFiles = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        HostApp.registerAgent(force: false)
+        // The LaunchAgent runs this executable: only the installed copy may claim it (opening
+        // a build product elsewhere re-pointed the agent at a file the next build replaces).
+        if Bundle.main.bundlePath.hasPrefix("/Applications/") { HostApp.registerAgent(force: false) }
         if !openedFiles { showStatus() }
         NSApplication.shared.activate()
     }
@@ -156,6 +158,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func open(path: String) {
         let w = ViewerWindow(path: path)
         viewers.append(w)
+        // Closed viewers go (each holds a whole document).
+        let id = ObjectIdentifier(w)
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.viewers.removeAll { ObjectIdentifier($0) == id } }
+        }
         w.makeKeyAndOrderFront(nil)
     }
 }
@@ -284,7 +291,7 @@ final class ViewerWindow: NSWindow {
         isReleasedWhenClosed = false
         contentView = preview
         preview.onExternalLink = { s in
-            if let u = URL(string: s), u.scheme != nil { NSWorkspace.shared.open(u) }
+            if let u = URL(string: s) { LinkPolicy.open(u) }
         }
         preview.show(Document.open(path: path))
         center()
