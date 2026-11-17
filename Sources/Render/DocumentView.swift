@@ -119,7 +119,7 @@ public final class DocumentView: NSView {
     private var tiles: [TileView] = []
     private var gutterTiles: [TileView] = []
     private let gutterView = GutterContainer()
-    private var lastTiledRect = CGRect.null
+    private var tiling = false
 
     /// Called when the selection changes (the find controller and agent want to know).
     public var onSelectionChange: (() -> Void)?
@@ -163,7 +163,6 @@ public final class DocumentView: NSView {
         for t in tiles { t.removeFromSuperview() }
         for t in gutterTiles { t.removeFromSuperview() }
         tiles.removeAll(); gutterTiles.removeAll()
-        lastTiledRect = .null
         if let sv = scrollView {
             if c.gutterWidth > 0 {
                 if gutterView.superview == nil { sv.addFloatingSubview(gutterView, for: .horizontal) }
@@ -213,7 +212,17 @@ public final class DocumentView: NSView {
 
     /// Ensures tiles cover the visible rect plus a margin; recycles the rest.
     func updateTiles() {
-        guard let c = content, let sv = scrollView else { return }
+        guard !tiling, let c = content, let sv = scrollView else { return }
+        tiling = true
+        defer { tiling = false }
+        // Exact geometry for the visible rect first. Only the visible rect forces it: margin
+        // tiles may draw from estimated markdown geometry and are redrawn when background
+        // layout lands (passing the margin made a tall viewport lay out a whole 900 KB
+        // document synchronously: 143 ms). willShow can grow the document (onLayoutChanged ->
+        // contentDidChangeLayout -> resize), so the wanted rect is computed after it, and the
+        // nested updateTiles it triggers returns at once: called after `want`, the nested call
+        // placed tiles that this one then parked, leaving a blank row (tilecheck, 1 run in 8).
+        c.willShow(sv.contentView.bounds.offsetBy(dx: -c.gutterWidth, dy: 0))
         let vis = sv.contentView.bounds
         if vis != cursorRectsFor {
             // Quick Look's remote window doesn't re-ask for cursor rects after resizes or
@@ -226,10 +235,6 @@ public final class DocumentView: NSView {
         let margin = ts / 2
         let want = vis.insetBy(dx: -margin, dy: -margin).intersection(bounds)
         if want.isNull || want.isEmpty { return }
-        // Only the visible rect forces exact layout. Margin tiles may draw from estimated
-        // markdown geometry; they are redrawn when background layout lands. (Passing `want`
-        // here made a tall viewport lay out a whole 900 KB document synchronously: 143 ms.)
-        c.willShow(vis.offsetBy(dx: -c.gutterWidth, dy: 0))
         let c0 = Int(want.minX / ts), c1 = Int((want.maxX - 0.5) / ts)
         let r0 = Int(want.minY / ts), r1 = Int((want.maxY - 0.5) / ts)
         let gw = c.gutterWidth
@@ -277,7 +282,6 @@ public final class DocumentView: NSView {
         }
         place(&tiles, gutter: false, cols: c0...c1, parent: self)
         if gw > 0 { place(&gutterTiles, gutter: true, cols: 0...0, parent: gutterView) }
-        lastTiledRect = want
     }
 
     /// First visible tile slot (row, col) without a placed tile, if any: the visible rect must
@@ -367,7 +371,10 @@ public final class DocumentView: NSView {
         let p = Palette.current(for: self)
         if p === palette { return }
         palette = p
-        if content?.setPalette(p) == true { resize() }
+        // Markdown re-lays out on a palette change (dark-only images): its exact prefix starts
+        // over, and drawing skips estimated blocks, so re-establish the visible rect's geometry
+        // now (it was blank until the next scroll).
+        if content?.setPalette(p) == true { resize(); updateTiles() }
         invalidateAll()
     }
 

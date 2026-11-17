@@ -254,7 +254,8 @@ public final class MarkdownContent: DocumentContent {
             }
         }
         size = CGSize(width: max(width, maxRight + m.padX), height: y + m.padTop * 1.5)
-        headingY = headingBlock.map { $0 >= 0 ? blocks[$0].y : 0 }
+        var lastY = m.padTop   // ascending even if a heading had no block (outlineIndex bisects)
+        headingY = headingBlock.map { if $0 >= 0 { lastY = blocks[$0].y }; return lastY }
         headingHeight = headingBlock.map { $0 >= 0 ? blocks[$0].h : 0 }
     }
 
@@ -661,9 +662,11 @@ public final class MarkdownContent: DocumentContent {
     }
 
     public func outlineIndex(atY y: CGFloat) -> Int {
-        var cur = -1
-        for (i, hy) in headingY.enumerated() where hy <= y { cur = i }
-        return cur
+        // Last heading at or above y (headingY ascends); binary search: runs per scroll event.
+        let hs = headingY
+        var lo = 0, hi = hs.count
+        while lo < hi { let mid = (lo + hi) >> 1; if hs[mid] <= y { lo = mid + 1 } else { hi = mid } }
+        return lo - 1
     }
 
     public func anchorSpan(_ name: String) -> (top: CGFloat, height: CGFloat)? {
@@ -715,4 +718,14 @@ struct Utf16Map {
     }
 
     subscript(o: Int) -> Int { table.map { $0[o - start] } ?? (o - start) }
+
+    /// The UTF-16 range of bytes `[lo, hi)`, clamped to a string of `length` units. The map
+    /// counts units from lead bytes, which matches the decoded string only for valid UTF-8 (the
+    /// loaders' invariant). Unclamped, one invalid sequence made a range run past the string,
+    /// and release CoreFoundation doesn't check: it wrote past its run array (a crash at first
+    /// paint from a 114-byte zip).
+    func range(_ lo: Int, _ hi: Int, length: Int) -> CFRange {
+        let a = min(self[lo], length), b = min(self[hi], length)
+        return CFRange(location: a, length: max(0, b - a))
+    }
 }

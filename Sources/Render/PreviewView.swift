@@ -160,11 +160,12 @@ public final class PreviewView: NSView {
             self?.documentView.invalidateAll()
             self?.refreshOutline()
         }
-        doc.onContentReplaced = { [weak self] in
-            guard let self else { return }
+        doc.onContentReplaced = { [weak self, weak doc] in
+            guard let self, let doc else { return }
             self.documentView.contentDidChangeLayout()
             if self.isFinding { _ = self.find(self.findBar.queryString) }   // offsets past the old end
             self.refreshOutline()
+            self.showNotice(doc.notice)   // background work can add one (formatting capped)
         }
         outline?.removeFromSuperview()
         outline = nil
@@ -180,14 +181,7 @@ public final class PreviewView: NSView {
             needsLayout = true
         }
         installOutline(doc.content)
-        notice?.removeFromSuperview()
-        notice = nil
-        if let text = doc.notice {
-            let n = NoticeView(text)
-            addSubview(n)
-            notice = n
-            needsLayout = true
-        }
+        showNotice(doc.notice)
         documentView.onSelectionChange = { [weak self] in self?.onStateChange?() }
         if isFinding { closeFind() }
         layoutSubtreeIfNeeded()
@@ -195,6 +189,18 @@ public final class PreviewView: NSView {
         documentView.setContent(doc.content, width: lastWidth)
         // Before the first draw, so only the tiles at the end are ever rendered.
         if doc.startAtEnd { documentView.scrollToTop(y: .greatestFiniteMagnitude) }
+    }
+
+    private func showNotice(_ text: String?) {
+        if notice?.string == text { return }
+        notice?.removeFromSuperview()
+        notice = nil
+        if let text {
+            let n = NoticeView(text)
+            addSubview(n)
+            notice = n
+            needsLayout = true
+        }
     }
 
     // MARK: - Early clicks
@@ -389,6 +395,7 @@ extension CGColor {
 /// would not render in `peep-dev render` bitmaps, and one string needs no text field.
 final class NoticeView: NSView {
     private let text: NSAttributedString
+    var string: String { text.string }
 
     init(_ s: String) {
         text = NSAttributedString(string: s, attributes: [

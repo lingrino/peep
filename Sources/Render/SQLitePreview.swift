@@ -43,6 +43,10 @@ enum SQLitePreview {
             return ("# \(escape(name))\n\nCouldn't open this database.\n", nil)
         }
         defer { sqlite3_close(db) }
+        // An untrusted file: schema-defined functions and virtual tables stay unused (trusted
+        // schema off), and corrupt pages are checked more strictly. (SQLITE_DBCONFIG_DEFENSIVE
+        // is a C variadic Swift can't call; read-only + immutable already rule out writes.)
+        sqlite3_exec(db, "PRAGMA trusted_schema=OFF; PRAGMA cell_size_check=ON", nil, nil, nil)
         // Interrupts long statements (counts) once `limit` passes.
         let limit = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
         defer { limit.deallocate() }
@@ -73,6 +77,14 @@ enum SQLitePreview {
         for t in tables {
             md += "## \(escape(t.name))\n\n"
             let quoted = "\"" + t.name.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            // Virtual tables (FTS, R-tree, ...) run their module's code over data the file
+            // controls (crafted FTS shadow tables were a known SQLite memory bug): schema only.
+            // Their shadow tables are ordinary tables and listed as such.
+            let virtual = t.sql.prefix(32).uppercased().replacingOccurrences(of: "  ", with: " ").hasPrefix("CREATE VIRTUAL TABLE")
+            if virtual {
+                md += "Virtual table: rows not read.\n\n" + fence("sql", t.sql.hasSuffix(";") ? t.sql : t.sql + ";")
+                continue
+            }
             var facts: [String] = []
             if nanotime() < deadline {
                 limit.pointee = min(deadline, nanotime() + countBudget)

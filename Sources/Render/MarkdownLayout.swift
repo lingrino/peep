@@ -7,9 +7,10 @@ import os
 ///
 /// Each block is laid out independently in *local* coordinates (block top = 0) by
 /// `MarkdownLayout.block`, which is nonisolated and touches only immutable inputs (`LayoutEnv`).
-/// `MarkdownContent.relayout` runs it over all blocks with `concurrentPerform`, then stacks the
-/// results on the main thread (gaps, quote bars, list markers depend on neighbors).
-/// Core Text shaping is ~70% of layout cost, so this scales almost linearly with P-cores.
+/// `MarkdownContent.relayout` lays out the first screen on the main thread and hands the rest
+/// to `LayoutPool` (below), which measures blocks in parallel; positions are stacked on the
+/// main thread (gaps, quote bars, list markers depend on neighbors). Core Text shaping is most
+/// of layout cost, so this scales with P-cores up to Core Text's own locks (see AGENTS.md).
 
 struct MDMetrics: Sendable {
     let body: CGFloat = 13
@@ -526,7 +527,7 @@ enum MarkdownLayout {
         var lastImage = CFRange(location: -1, length: 0)
         for ri in runs {
             let r = doc.runs[Int(ri)]
-            let range = CFRange(location: map[Int(r.start)], length: map[Int(r.end)] - map[Int(r.start)])
+            let range = map.range(Int(r.start), Int(r.end), length: s.length)
             if range.length <= 0 { continue }
             let st = r.style
             if range.location == lastImage.location && range.length == lastImage.length { continue }
@@ -586,7 +587,8 @@ enum MarkdownLayout {
                 let kind = tokens.kinds[k]
                 if kind != 0 {
                     let ts = max(tokens.start(k), Int(b.textStart)), te = min(tokens.end(k), Int(b.textEnd))
-                    let range = CFRange(location: map[ts], length: map[te] - map[ts])
+                    let range = map.range(ts, te, length: ns.length)
+                    if range.length <= 0 { k += 1; continue }
                     let d = book.attributes(font: env.palette.tokenBold[Int(kind)] ? bold : f, color: env.palette.tokenColors[Int(kind)],
                                             paragraph: FontBook.codeParagraph)
                     CFAttributedStringSetAttributes(a, range, d, true)

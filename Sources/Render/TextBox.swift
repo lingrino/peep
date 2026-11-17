@@ -24,20 +24,99 @@ final class TextBox: @unchecked Sendable {
     let utf16: [Int32]?
     let utf16Count: Int
 
+    /// UTF-16 offset of each line's frame within the box (nil: one frame, all zero). Lines
+    /// from a later frame report string indices relative to that frame's substring.
+    private let lineBase: [Int]?
+
+    /// Frame sizes. A box is one frame unless it is long: Core Text's line breaking is
+    /// quadratic in the length of a paragraph (it isn't greedy, it weighs the whole paragraph:
+    /// 100 KB took 0.41 s, 200 KB 1.6 s, 1 MB 32 s on the main thread), and a frame is bounded
+    /// by its path height (blocks past 1,000,000 pt were cut). So a long box is laid out as
+    /// consecutive frames: cut after a newline when there is one (layout identical but for
+    /// rounding: < 0.5 pt), else, inside a paragraph longer than `longParagraph`, in windows
+    /// whose last lines are dropped and re-laid out by the next window (breaks then differ
+    /// slightly from one huge paragraph's; nobody reads 16 KB paragraphs for their rag).
+    static let longParagraph = 16_384
+    static let maxFrame = 262_144
+    private static let paragraphWindow = 16_384, windowLookahead = 1_024
+
     init(attributed: NSAttributedString, origin: CGPoint, width: CGFloat, start: Int, end: Int,
          text: TextBuffer, lineGap: CGFloat = 0) {
         self.start = start
         self.end = end
-        let setter = CTFramesetterCreateWithAttributedString(attributed)
         let len = attributed.length
-        // One layout pass: frame into a very tall rect, measure from the lines (skips
+        // One layout pass per frame: frame into a very tall rect, measure from the lines (skips
         // CTFramesetterSuggestFrameSizeWithConstraints, which would lay out a second time).
         let h: CGFloat = 1_000_000
         let path = CGPath(rect: CGRect(x: 0, y: 0, width: max(1, width), height: h), transform: nil)
-        let frame = CTFramesetterCreateFrame(setter, CFRange(location: 0, length: len), path, nil)
-        let ls = (CTFrameGetLines(frame) as? [CTLine]) ?? []
-        var origins = [CGPoint](repeating: .zero, count: ls.count)
-        if !ls.isEmpty { CTFrameGetLineOrigins(frame, CFRange(location: 0, length: 0), &origins) }
+        var ls: [CTLine] = []
+        var origins: [CGPoint] = []   // y: baseline from the box's first frame top (down)
+        var bases: [Int] = []
+        if len <= TextBox.longParagraph {
+            let setter = CTFramesetterCreateWithAttributedString(attributed)
+            let frame = CTFramesetterCreateFrame(setter, CFRange(location: 0, length: len), path, nil)
+            ls = (CTFrameGetLines(frame) as? [CTLine]) ?? []
+            var o = [CGPoint](repeating: .zero, count: ls.count)
+            if !ls.isEmpty { CTFrameGetLineOrigins(frame, CFRange(location: 0, length: 0), &o) }
+            origins = o.map { CGPoint(x: $0.x, y: h - $0.y) }
+        } else {
+            let str = attributed.string as NSString
+            var pos = 0
+            var top: CGFloat = 0
+            var nl = -1   // the next newline at or after the last search (len: none); reused by
+                          // a long paragraph's windows, which would otherwise rescan its rest
+            while pos < len {
+                // Whole paragraphs up to maxFrame units; a long paragraph gets windows.
+                var cut = pos, exact = true
+                while cut < len {
+                    if nl < cut {
+                        let f = str.range(of: "\n", options: .literal, range: NSRange(location: cut, length: len - cut)).location
+                        nl = f == NSNotFound ? len : f
+                    }
+                    let paraEnd = min(len, nl + 1)
+                    if paraEnd - cut > TextBox.longParagraph {
+                        if cut > pos { break }
+                        cut = min(paraEnd, pos + TextBox.paragraphWindow)
+                        exact = cut == paraEnd
+                        break
+                    }
+                    if paraEnd - pos > TextBox.maxFrame && cut > pos { break }
+                    cut = paraEnd
+                }
+                let sub = attributed.attributedSubstring(from: NSRange(location: pos, length: cut - pos))
+                let setter = CTFramesetterCreateWithAttributedString(sub)
+                let frame = CTFramesetterCreateFrame(setter, CFRange(location: 0, length: 0), path, nil)
+                let fl = (CTFrameGetLines(frame) as? [CTLine]) ?? []
+                if fl.isEmpty { break }
+                var o = [CGPoint](repeating: .zero, count: fl.count)
+                CTFrameGetLineOrigins(frame, CFRange(location: 0, length: 0), &o)
+                var keep = fl.count
+                if !exact {   // drop lines near the window's end (they saw a fake paragraph end)
+                    let limit = cut - pos - TextBox.windowLookahead
+                    while keep > 1 {
+                        let r = CTLineGetStringRange(fl[keep - 1])
+                        if r.location + r.length <= limit { break }
+                        keep -= 1
+                    }
+                }
+                // A later frame starts where the previous one's last line ends (its descent and
+                // leading below the baseline); its own first-line offset follows.
+                if let last = ls.last {
+                    var desc: CGFloat = 0, lead: CGFloat = 0
+                    _ = CTLineGetTypographicBounds(last, nil, &desc, &lead)
+                    top = origins[origins.count - 1].y + desc + lead
+                }
+                for i in 0..<keep {
+                    ls.append(fl[i])
+                    origins.append(CGPoint(x: o[i].x, y: top + h - o[i].y))
+                    bases.append(pos)
+                }
+                // Next frame: after the last kept line (also when the frame filled its height).
+                let r = CTLineGetStringRange(fl[keep - 1])
+                pos += max(1, r.location + r.length)
+            }
+        }
+        lineBase = bases.isEmpty ? nil : bases
         lines = ls
         var b: [CGFloat] = [], x: [CGFloat] = [], t: [CGFloat] = [], bt: [CGFloat] = []
         b.reserveCapacity(ls.count)
@@ -49,12 +128,12 @@ final class TextBox: @unchecked Sendable {
         if let l = ls.first {
             var asc: CGFloat = 0
             _ = CTLineGetTypographicBounds(l, &asc, nil, nil)
-            shift = (h - origins[0].y) - asc - lineGap / 2
+            shift = origins[0].y - asc - lineGap / 2
         }
         for (i, l) in ls.enumerated() {
             var asc: CGFloat = 0, desc: CGFloat = 0, lead: CGFloat = 0
             _ = CTLineGetTypographicBounds(l, &asc, &desc, &lead)
-            let base = origin.y + (h - origins[i].y) - shift
+            let base = origin.y + origins[i].y - shift
             b.append(base)
             x.append(origin.x + origins[i].x)
             t.append(base - asc - lineGap / 2)
@@ -137,13 +216,13 @@ final class TextBox: @unchecked Sendable {
             if lineBottom[i] < clip.minY { continue }
             if lineTop[i] > clip.maxY { break }
             let line = lines[i]
-            let range = CTLineGetStringRange(line)
-            let lStart = u8(range.location), lEnd = u8(range.location + range.length)
+            let range = CTLineGetStringRange(line), lb = lineBase?[i] ?? 0
+            let lStart = u8(lb + range.location), lEnd = u8(lb + range.location + range.length)
             // Selection / matches behind the text.
             if h.selEnd > h.selStart && h.selStart < lEnd + 1 && h.selEnd > lStart {
                 let a = max(h.selStart, lStart), b = min(h.selEnd, lEnd)
-                var x0 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(a), nil)
-                var x1 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(b), nil)
+                var x0 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(a) - lb, nil)
+                var x1 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(b) - lb, nil)
                 if h.selEnd > lEnd { x1 = max(x1, rect.maxX) }
                 if h.selStart <= lStart && i == 0 { x0 = min(x0, lineX[i]) }
                 ctx.setFillColor(palette.selection)
@@ -155,8 +234,8 @@ final class TextBox: @unchecked Sendable {
                 if ms >= lEnd { break }
                 let a = max(ms, lStart), b = min(me, lEnd)
                 if b > a {
-                    let x0 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(a), nil)
-                    let x1 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(b), nil)
+                    let x0 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(a) - lb, nil)
+                    let x1 = lineX[i] + CTLineGetOffsetForStringIndex(line, u16(b) - lb, nil)
                     ctx.setFillColor(mi == h.current ? palette.findCurrent : palette.findMatch)
                     let r = CGRect(x: x0 - 1, y: lineTop[i] + 1, width: x1 - x0 + 2, height: lineBottom[i] - lineTop[i] - 2)
                     ctx.addPath(CGPath(roundedRect: r, cornerWidth: 3, cornerHeight: 3, transform: nil))
@@ -217,16 +296,16 @@ final class TextBox: @unchecked Sendable {
         if i < 0 { return start }
         if p.y < (lineTop.first ?? rect.minY) { return start }
         let u = CTLineGetStringIndexForPosition(lines[i], CGPoint(x: p.x - lineX[i], y: 0))
-        return u8(max(0, u))
+        return u8(max(0, u) + (lineBase?[i] ?? 0))
     }
 
     func rect(for a: Int, _ b: Int) -> CGRect {
         let ua = u16(a)
         for i in lines.indices {
-            let r = CTLineGetStringRange(lines[i])
-            if ua >= r.location && ua <= r.location + r.length {
-                let x0 = CTLineGetOffsetForStringIndex(lines[i], ua, nil)
-                let x1 = CTLineGetOffsetForStringIndex(lines[i], u16(b), nil)
+            let r = CTLineGetStringRange(lines[i]), lb = lineBase?[i] ?? 0
+            if ua >= lb + r.location && ua <= lb + r.location + r.length {
+                let x0 = CTLineGetOffsetForStringIndex(lines[i], ua - lb, nil)
+                let x1 = CTLineGetOffsetForStringIndex(lines[i], u16(b) - lb, nil)
                 return CGRect(x: lineX[i] + x0, y: lineTop[i], width: max(4, x1 - x0), height: lineBottom[i] - lineTop[i])
             }
         }
@@ -247,7 +326,7 @@ final class TextBox: @unchecked Sendable {
             CTRunGetPositions(run, CFRange(location: 0, length: 0), &pos)
             CTRunGetAdvances(run, CFRange(location: 0, length: 0), &adv)
             CTRunGetStringIndices(run, CFRange(location: 0, length: 0), &idx)
-            for g in 0..<n where x >= pos[g].x && x < pos[g].x + max(adv[g].width, 1) { return u8(idx[g]) }
+            for g in 0..<n where x >= pos[g].x && x < pos[g].x + max(adv[g].width, 1) { return u8(idx[g] + (lineBase?[i] ?? 0)) }
         }
         return nil
     }

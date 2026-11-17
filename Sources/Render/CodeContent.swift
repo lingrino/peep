@@ -181,8 +181,10 @@ public final class CodeContent: DocumentContent {
     func shape(_ s: Int, _ e0: Int, palette: Palette) -> Shaped {
         var e = min(e0, s + CodeContent.maxShapedLine)
         while e > s && e < e0 && text.base[e] & 0xC0 == 0x80 { e -= 1 }   // char boundary
+        // Invalid UTF-8 (the loaders shouldn't produce it) decodes lossily rather than to an
+        // empty line; the token ranges below are clamped to whatever length results.
         let str = CFStringCreateWithBytes(nil, text.base + s, e - s, CFStringBuiltInEncodings.UTF8.rawValue, false)
-            ?? ("" as CFString)
+            ?? (String(decoding: UnsafeBufferPointer(start: text.base + s, count: e - s), as: UTF8.self) as CFString)
         let attr = CFAttributedStringCreateMutable(nil, 0)!
         CFAttributedStringReplaceString(attr, CFRange(location: 0, length: 0), str)
         let len = CFAttributedStringGetLength(attr)
@@ -199,8 +201,10 @@ public final class CodeContent: DocumentContent {
                 let kind = t.kinds[k]
                 u += utf16Count(pos, ts)
                 let ulen = utf16Count(ts, te)
-                if kind != 0 && ulen > 0 {
-                    let r = CFRange(location: u, length: ulen)
+                // Clamped: release CoreFoundation doesn't bounds-check, and a range past the
+                // string (counts from invalid UTF-8) wrote outside its run array.
+                if kind != 0 && ulen > 0 && u < len {
+                    let r = CFRange(location: u, length: min(ulen, len - u))
                     CFAttributedStringSetAttribute(attr, r, kCTForegroundColorAttributeName, palette.tokenColors[Int(kind)])
                     if palette.tokenBold[Int(kind)] {
                         CFAttributedStringSetAttribute(attr, r, kCTFontAttributeName, typo.monoBold.font)

@@ -27,7 +27,9 @@ final class ImageStore {
 
     /// Bound decode cost/memory: nothing is drawn wider than a screen.
     nonisolated static let maxPixels = 2600
-    nonisolated static let maxBytes = 25 << 20
+    nonisolated static let maxBytes = RemoteFetch.maxBytes
+    /// Remote images loaded per document; 0 never loads any (see README, Security and privacy).
+    static let maxRemote = 256
 
     init(_ specs: [MDImage], baseDir: URL?) {
         self.specs = specs
@@ -43,7 +45,14 @@ final class ImageStore {
             let u = (dark ? s.darkURL : nil) ?? s.url
             byURL[u, default: []].append(i)
         }
+        var remote = 0
         for (url, indices) in byURL {
+            // A document gets a bounded number of remote fetches (each is a request to a host
+            // it chose); the rest show as failed images.
+            if url.hasPrefix("http") {
+                remote += 1
+                if remote > ImageStore.maxRemote { for i in indices { slots[i].state = .failed }; continue }
+            }
             for i in indices { slots[i].state = .loading }
             load(url) { [weak self] img, size in
                 guard let self else { return }
@@ -66,6 +75,9 @@ final class ImageStore {
             self.onLoad?()
         }
     }
+
+    /// Some image is still loading (dev tools wait for them).
+    var loading: Bool { slots.contains { $0.state == .loading } }
 
     func image(_ i: Int) -> CGImage? { i < slots.count ? slots[i].image : nil }
     func failed(_ i: Int) -> Bool { i < slots.count && slots[i].state == .failed }
@@ -125,26 +137,16 @@ final class ImageStore {
             DispatchQueue.global(qos: .userInitiated).async {
                 finish(try? Data(contentsOf: url, options: .mappedIfSafe))
             }
+        } else if !RemoteFetch.allowed(url) {
+            done(nil, .zero)   // http, local network (see RemoteFetch)
         } else if let fetch = ImageStore.remoteFetch {
             fetch(url) { data in
                 DispatchQueue.global(qos: .userInitiated).async { finish(data) }
             }
         } else {
-            var req = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 15)
-            req.setValue("Peep (Quick Look)", forHTTPHeaderField: "User-Agent")
-            ImageStore.session.dataTask(with: req) { data, resp, _ in
-                let ok = (resp as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
-                finish(ok ? data : nil)
-            }.resume()
+            RemoteFetch.shared.fetch(url, done: finish)
         }
     }
-
-    nonisolated static let session: URLSession = {
-        let c = URLSessionConfiguration.ephemeral
-        c.timeoutIntervalForRequest = 15
-        c.httpMaximumConnectionsPerHost = 6
-        return URLSession(configuration: c)
-    }()
 
     nonisolated static func dataURI(_ s: String) -> Data? {
         guard let comma = s.firstIndex(of: ",") else { return nil }
@@ -173,9 +175,13 @@ final class ImageStore {
                 return (img, CGSize(width: pw / CGFloat(scale), height: ph / CGFloat(scale)))
             }
         }
-        // SVG (common for badges) and PDF: let AppKit rasterize at 2x.
-        guard let ns = NSImage(data: data), ns.size.width > 0 else { return (nil, .zero) }
-        var rect = CGRect(origin: .zero, size: CGSize(width: ns.size.width * 2, height: ns.size.height * 2))
+        // SVG (common for badges) and PDF: let AppKit rasterize at 2x, within maxPixels like
+        // bitmaps. The declared size is the document's to choose: a 200-byte SVG declaring
+        // 30000 x 30000 rasterized to 72 GB.
+        guard let ns = NSImage(data: data), ns.size.width > 0, ns.size.height > 0 else { return (nil, .zero) }
+        let scale = min(2, CGFloat(maxPixels) / max(ns.size.width, ns.size.height))
+        var rect = CGRect(origin: .zero, size: CGSize(width: max(1, (ns.size.width * scale).rounded()),
+                                                      height: max(1, (ns.size.height * scale).rounded())))
         let cg = ns.cgImage(forProposedRect: &rect, context: nil, hints: nil)
         return (cg, ns.size)
     }
