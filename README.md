@@ -28,7 +28,9 @@ open -a Peep
 ```
 
 Opening Peep.app once starts its small background agent; grant it Accessibility access when
-asked (Quick Look previews can't receive keystrokes, so the agent forwards ⌘F and friends).
+asked (System Settings → Privacy & Security → Device Control and Data Access, as macOS 27
+calls it). Quick Look previews can't receive keystrokes or prompt clicks, so the agent
+forwards ⌘F and friends and outline clicks, and shows the copy-path button.
 Update with `brew upgrade --cask peep`: the agent restarts itself when its app is replaced.
 
 [Examples](Examples) has a sample of every supported file type to try it on.

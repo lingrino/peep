@@ -436,7 +436,12 @@ as a fix with a test), and stay clean under `-sanitize=address`.
   Accessibility grant carries across `brew upgrade` and `Scripts/build.sh install` and
   survives certificate renewals. Never switch local builds to ad-hoc or another identity,
   or change the bundle ids (`com.lingrino.peep`, `com.lingrino.peep.preview`) or the agent's
-  label: that means granting Accessibility again. (Until 2026-11-16 builds used a
+  label: that means granting Accessibility again. macOS 27 lists the grant under Privacy &
+  Security → Device Control and Data Access. After a signing change the old entry stays
+  but no longer matches: remove Peep there (−) and add /Applications/Peep.app again (+);
+  switching the old entry on doesn't take. Without the grant there is no event tap, so no
+  key forwarding, no early outline clicks (~0.5 s late) and no copy-path button; the
+  agent logs `trusted=` at start. (Until 2026-11-16 builds used a
   self-signed "Peep Local Signing" identity; a Mac that still has
   `~/Library/Keychains/peep-signing.keychain-db` can delete it.)
 - The agent is a plain LaunchAgent in `~/Library/LaunchAgents/com.lingrino.peep.agent.plist`,
