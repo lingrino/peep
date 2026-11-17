@@ -22,8 +22,11 @@ compromise for latency. Read this whole file before changing anything.
 1. `Scripts/check.sh` (~35 s): tests (debug and release), zero compiler warnings, both
    targets (and the `DIAG=1` variant), then the view checks over `Examples/` and the docs:
    smoke (open, draw, scroll, find, select every file; Markdown geometry), tile coverage,
-   link hit testing. Run it first when coming back and after any macOS or toolchain update;
+   link hit testing, and hostile inputs (`Scripts/make-adversarial.py` -> `.build/adversarial`:
+   files that once crashed, trapped, hung or ran away with memory; smoke with a time and
+   memory budget). Run it first when coming back and after any macOS or toolchain update;
    it must pass before every commit. `--corpus` adds `.build/corpus` (`Scripts/make-corpus.sh`).
+   A new class of hostile input (a crash, a super-linear case) gets a generator line there.
 2. Measure the change against the last commit (or `--rev R`), on this machine:
    - renders: `Scripts/compare.sh renders [files]` pixel-diffs every example; every
      difference must be intended and said in the commit message;
@@ -54,7 +57,8 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
    (Finder's column preview pane and the Space panel each get one); the process is long-lived
    and reused. `preparePreviewOfFile` runs on the main thread: load → decode → detect → lex/parse
    → show → draw the first tiles, then calls the handler. Logs `prepare <file>: <stage
-   timings>` (subsystem `com.lingrino.peep`), and once per process its cold-start time.
+   timings>` (subsystem `com.lingrino.peep`, info level: not persisted, file names stay
+   off disk), and once per process its cold-start time.
 2. **Keyboard agent** — `Sources/App/Agent.swift`. Quick Look previews *never* receive key
    events (the panel never becomes key; typing goes to Finder). The agent installs a session
    event tap (needs the Accessibility grant) and forwards keys over XPC **only** when a Peep
@@ -64,7 +68,13 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
    It also forwards (without consuming) single clicks in the panel, which Quick Look would
    otherwise deliver ~0.5 s late (see Quick Look facts).
    It also opens links (sandbox forbids `NSWorkspace.open`) and fetches remote images (Quick
-   Look's sandbox denies outbound connections even with `network.client`).
+   Look's sandbox denies outbound connections even with `network.client`). The extension
+   renders untrusted files, so the agent trusts it with little: `open` is honoured only within
+   3 s of a click the tap saw in the panel, and goes through `LinkPolicy` (documents open,
+   anything that could run is revealed in Finder); fetches go through `RemoteFetch` (https,
+   public hosts only, also on redirects; no cookies; streamed with a size cap and timeouts).
+   Accessibility calls have a 0.25 s messaging timeout (they share the tap's thread: a busy
+   Finder would otherwise hold every keystroke system-wide for up to 6 s).
    And it shows the copy-path button after the panel's title (`TitleButton`): the title bar is
    Quick Look's, so the button is a tiny non-activating window of the agent's (activation policy
    `.accessory`), placed from the title text's Accessibility frame (`AXStaticText` in the
@@ -90,9 +100,9 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 | `Sources/Core/Lex/` | `TokenStream` (SoA tokens), `KeywordTable`, `ByteClass`, `CLike` engine + `Specs` (most languages), `CLikeExtras` (one language's literals: Ruby/Perl quote-likes and heredocs, sigils, C# raw strings, tagged templates), `Formats` (JSON, YAML, TOML/INI, XML/HTML, CSS, shell, diff, Makefile, Dockerfile, PHP, markdown source), `Language` (detection table, wrapper suffixes, dispatch), `CodeOutline` (declarations -> sidebar entries) |
 | `Sources/Core/Markdown/` | `BlockParser` (CommonMark/GFM blocks), `InlineParser` (inlines, HTML subset, reference table), `MarkdownParser` (assembly), `MarkdownModel` (flat output; links/images as ranges in a string store), `Buffers` (raw growable arrays, stack arena, SIMD newline offsets), `Entities`, `Emoji` + generated `EmojiTable` (GitHub shortcodes), `Notebook` (.ipynb -> Markdown) |
 | `Sources/Core/Archive/` | `ArchiveListing` (entries SoA, folder tree, text + tokens), `ZipReader` (central directory), `TarReader` (headers, pax/GNU), `Decompress` (gzip/xz streams, single compressed files) |
-| `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline: archives, compressed files, SQLite, notebooks, minified JSON, logs), `SQLitePreview`, `Prewarm` (launch-time warm-up) |
+| `Sources/Render/` | `DocumentView` (tiles, selection, mouse), `CodeContent`, `MarkdownContent` + `MarkdownLayout` (progressive, parallel) + `TextBox`, `ImageStore`, `RemoteFetch` (remote image policy and limits), `OutlineView` (TOC), `FindBar`, `PreviewView` (composition, key handling, truncation notice), `Theme`, `Document` (file → content pipeline: archives, compressed files, SQLite, notebooks, minified JSON, logs), `SQLitePreview`, `Prewarm` (launch-time warm-up) |
 | `Sources/Preview/` | `main.swift` (starts `Prewarm`, then `NSExtensionMain`), principal class `PreviewViewController`, `AgentClient`, `Diag` (`DIAG=1` builds only) |
-| `Sources/App/` | `HostApp` (setup status, viewer windows), `Agent` (XPC, event tap, link opening, image fetching), `TitleButton` (copy-path button) |
+| `Sources/App/` | `HostApp` (setup status, viewer windows), `Agent` (XPC, event tap, link opening, image fetching), `Links` (`LinkPolicy`: what a clicked link may open), `TitleButton` (copy-path button) |
 | `Dev/` | `peep-dev` (`Scripts/dev.sh` with no arguments lists the commands): `Render`, `Checks` (exit 1 on problems), `Bench`, `Dumps`, `Panel` (live Quick Look timing) |
 | `Tests/` | Zero-dependency test harness + tests (text, search, lexers, markdown, archives, notebooks) |
 | `Examples/` | A sample of every supported type for looking at by hand (see its README); binaries come from `Scripts/make-examples.sh` |
@@ -148,6 +158,23 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 
 - Text is UTF-8 bytes in a `TextBuffer` with 64 zero bytes of padding: SIMD loops may read past
   the end; scalar scanners may rely on a 0 sentinel. Never use `String`/`Character` in hot paths.
+- Every `TextBuffer` the renderer gets is *valid* UTF-8 (byte -> UTF-16 maps depend on it).
+  Loads cut short (size limits, time budgets, log tails, JSON prefixes) drop the partial
+  character at each end (`Decoder.completeEnd`, `continuationBytes`); archive names use the
+  decoder's strict rule (`sequenceLength`) with a Latin-1 fallback.
+- Hostile input must stay linear: a crash or hang takes down the shared preview process, and
+  selecting a file in Finder's column view is enough to open it.
+  - Native recursion is bounded: `TokenStream.nesting` (32 lexer levels: interpolation holes,
+    tagged templates, heredocs, shell `$(`), `BlockParser.maxNesting` (100 containers).
+  - A scan that may be retried from a later start is capped (32 link-destination parens,
+    `CLike.maxParens`, `maxDelimiterRun`) or remembers its failure (`titleOpenEnd`,
+    `tickLast`, `knownRegex`, `linkFloor`).
+  - Output is budgeted: `tablePadding` (cells padded into short table rows), `nestedAltBudget`,
+    formatted JSON (4 x the largest load, a note line at the cut), archive listings.
+  - Numbers read from files are untrusted: `Int(exactly:)`, overflow-free bounds checks
+    (`a > n - b`, not `a + b > n`), sizes never allocated before they're checked.
+  - Test a new scanner with repeated-opener input at two sizes (4x the input should cost 4x
+    the time), and add the case to `Scripts/make-adversarial.py`.
 - SIMD in plain Swift (`SIMD16<UInt8>`) compiles to good NEON **only if**:
   - comparisons are vector-vs-vector (`v .< SIMD16(repeating: 0)`). A scalar RHS (`v .< 0`)
     scalarizes to a per-lane loop through the stack (30× slower — this happened);
@@ -163,10 +190,13 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   slowed every language ~15%, and reading spec options on common bytes (`"` `=` `<`) cost Python
   8%. New behavior goes in rare branches, behind a local gate (`anyDialect`, `hint != 0`), reading
   options from `s` there; state that would be one more variable is recomputed by looking back
-  (`expressionKeywordBefore`). Compare with `bench.sh`-style alternating runs of the old binary.
+  (`expressionKeywordBefore`). Compare with alternating runs of the old binary (`Scripts/compare.sh bench`).
 - Rendering: tiles (512 pt, layer-backed, opaque) draw once; scrolling moves layers. A tile is
   "placed" by its row/col: parked (recycled) tiles must reset them, or a slot looks covered
-  while its tile has a zero frame (blank bands after elastic overscroll + jumps; `tilecheck`). ASCII code
+  while its tile has a zero frame (blank bands after elastic overscroll + jumps; `tilecheck`). `updateTiles` asks for
+  exact geometry (`willShow`) *before* computing the wanted rect and ignores the nested call
+  that growing the document triggers: the other order parked the tiles the nested call had
+  placed (a blank row past the estimated end; `tilecheck`'s deterministic pass). ASCII code
   lines draw via a glyph table + `CTFontDrawGlyphs` (positions are in *text space*: negate y
   because the text matrix flips). Non-ASCII lines use `CTLine`.
 - In the flipped context, Core Text baseline offsets are inverted (superscript = negative).
@@ -222,6 +252,21 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
   edge; a long line with one non-ASCII character must not be shaped whole per tile.
 - Core Text applies a paragraph style's extra line height above the first line too; `TextBox`
   shifts it away so a box starts at its first line's top.
+- Core Text line breaking is not greedy: it weighs the whole paragraph, and its cost is
+  quadratic in the paragraph's length (100 KB: 0.41 s, 1 MB: 32 s). A frame is also bounded by
+  its path height (1,000,000 pt: a 70,000-line code block was cut). So a box longer than 16K
+  UTF-16 units is laid out as consecutive frames: cut after newlines (identical layout but for
+  < 0.5 pt rounding), and inside a paragraph over 16K units in 16K windows whose last lines are
+  re-laid out by the next window (breaks differ slightly from one frame's). Lines then carry
+  their frame's offset (`lineBase`): Core Text string indices are per frame. Shorter boxes
+  are one frame, exactly as before.
+- Per-scroll work must not scan per entry: outline lookups bisect (a linear `lastIndex { }`
+  over 100k headings was 2.4 ms per scroll event; each closure call also pays a main-actor
+  executor check under Swift 6).
+- Every CFAttributedString range is clamped to the string's length (`Utf16Map.range`):
+  release CoreFoundation doesn't bounds-check and writes past its run array. Byte -> UTF-16
+  maps assume valid UTF-8, which loaders guarantee; the clamp keeps a slip from being memory
+  corruption.
 - Markdown parse is copy-once: block content is parsed straight from the source when its lines
   are contiguous there (else gathered once), inline text nodes are byte ranges into that input,
   and emit copies source -> output with inline 16-byte vector copies. That input must be padded
@@ -251,6 +296,11 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
     `^` before the footnote call: list items starting with a link are common), and per-block
     context work is gated by a counter (`openSpecial`).
   - A new byte field can grow a hot struct's stride (`Container` 24 -> 32): put it in padding.
+  - Code in `CLike.lex`'s loop costs even when it never runs: a 3-instruction cap in the C#
+    `$` branch slowed every C-family language 1-4%. Rare-branch work goes in `@inline(never)`
+    helpers (`csharpDollar`, `swiftHole`). Likewise a check inside a hot loop that captures
+    state in a nested function or closure keeps that state in memory: checks go between
+    slices of work (JSON formatting: 9%; tar: ~100 ns per entry).
 - Footnotes: definitions are containers (indent 4, like list items) found by the block pass;
   references number them on first use; their blocks render after the main text (an ordered
   list, smaller and muted, "↩" back-links). In-document anchors `#fn:N` / `#fnref:N:k` can't
@@ -261,14 +311,23 @@ toolchain (`DEVELOPER_DIR`); Xcode (for Instruments) is also installed.
 
 - **Archives** (`ArchiveKind`): never loaded; ZIP from the central directory, tar from headers,
   tar.gz/xz streamed. 25 ms budget, then the background pass swaps in the full listing
-  (`CodeContent.replace` + `onContentReplaced`); renders over 25k entries are deferred. The
-  tree is built from each entry's folder chain (no global sort: that was 344 ms for 150k).
-- **Single .gz/.xz** files preview their content (40 ms decompression budget).
+  (`CodeContent.replace` + `onContentReplaced`). The main thread renders a listing only
+  within 25k entries, 4 MiB of names and 50k lines (60 entries with long nested names imply
+  2 million folders); bigger ones show a placeholder first. Limits: 1M entries, 64 MiB of
+  names, about 128 MiB of rendered text, 1 MiB long-name/pax payloads; the ZIP directory is
+  read in 1 MiB chunks. Background work holds the `Document` weakly and stops when it goes
+  away. The tree is built from each entry's folder chain (no global sort: 344 ms for 150k).
+- **Single .gz/.xz** files preview their content (40 ms decompression budget). gzip members
+  are decoded in turn; Apple's zlib reads ~64 KB ahead and never says where a DEFLATE stream
+  ends, so the next member's header is found by its magic plus the previous member's ISIZE
+  (more than 1024 members at under a KB of output each end the data).
 - **Notebooks** become Markdown (`Notebook`); outputs are ```` ```output ```` fences, drawn
   with a rule instead of the code background (`MDBlock.output`).
 - **SQLite**: read-only + `immutable` URI; never plain `count(*)` (uninterruptible B-tree
   walk), count to 100k in an interruptible scan, else `max(rowid)`.
 - **Minified JSON** is re-indented (average line > 200 bytes); progressive above 1 MB.
+  Output is capped (re-indenting grows text up to 82x): 4 MiB on the main thread, 4 x the
+  largest load in the background, with a note line and a notice at the cut.
 - **Logs** open at the end; >64 MB logs load their last 64 MB.
 - **Wrapper suffixes** (`.dist`, `.example`, `.in`, `.j2`, ...) are looked through by
   `Language.detect`; each wrapper is one registered type.
@@ -318,7 +377,7 @@ as a fix with a test), and stay clean under `-sanitize=address`.
 ## Quick Look facts (verified on macOS 27)
 
 - QL matches **exact** UTIs only (no conformance). Many extensions have *dynamic* UTIs
-  (`dyn.a…`), computed in `Dev/main.swift:dynamicUTI`. Extensionless files are `public.data`.
+  (`dyn.a…`), computed in `Dev/Dumps.swift:dynamicUTI`. Extensionless files are `public.data`.
 - Apple's built-in previewers win for some standard types whatever we list (measured in Finder):
   `.txt` (`public.plain-text`), `.csv` (the system Office generator claims it), `.pdf`, `.html`,
   `.svg`. For others Apple also claims (JSON, XML) and everything else, Peep wins. So Peep doesn't
@@ -367,7 +426,7 @@ as a fix with a test), and stay clean under `-sanitize=address`.
 
 ## Debugging
 
-- Logs: `log stream --style compact --predicate 'subsystem == "com.lingrino.peep"'`
+- Logs: `log stream --style compact --level info --predicate 'subsystem == "com.lingrino.peep"'`
   (use `/usr/bin/log` from zsh). Crash reports: `~/Library/Logs/DiagnosticReports/Peep*.ips`.
 - Each extension process logs "cold start: first prepare began N ms after process start"
   once (~150 ms is dyld + AppKit + Quick Look's view-service handshake, before any of our
