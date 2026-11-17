@@ -85,9 +85,10 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
    items a file reference `AXURL`; the panel itself exposes no path; in list view Finder's
    focus is the panel, so its main window is searched). Re-placed once input pauses after
    state messages, keys and clicks in Finder (AX calls are served on Finder's main thread:
-   not per key repeat), mouse-up, and a 0.5 s poll. The computer-use screenshot
-   tool doesn't show the agent's windows (a launchd process, not the app): verify with
-   `CGWindowListCopyWindowInfo` and by clicking it (`pbpaste`).
+   not per key repeat), mouse-up, and a 0.5 s poll. Its window is the agent's (a launchd process, not an app):
+   find it with `CGWindowListCopyWindowInfo` (owner "Peep"), whose bounds are in points, while
+   a computer-use screenshot's frame may be scaled (0.907x on one display): click where a
+   zoomed screenshot shows the button, then check `pbpaste`.
 3. **Peep.app** — `Sources/App/HostApp.swift`. Opening it shows setup status (extension,
    agent, Accessibility) and can open any file in a viewer window with the same renderer.
    `Peep --register` (used by the installer) writes/reloads the LaunchAgent plist.
