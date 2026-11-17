@@ -80,6 +80,49 @@ final class AgentCore {
         }
         startListener()
         installTapWhenTrusted()
+        restartWhenReplaced()
+    }
+
+    // MARK: - Upgrades
+
+    private var launchedExecutable: [Int]?
+    private var replaceGeneration = 0
+    private var bundleEvents: FSEventStreamRef?
+
+    /// `brew upgrade` swaps Peep.app under the running agent (and `Scripts/build.sh install`
+    /// rewrites it in place). Watch the folder holding the bundle; once things settle, if the
+    /// executable is a different file, end the extension processes still running the old code
+    /// (Quick Look reuses them) and exit: launchd starts the new agent (KeepAlive), and Quick
+    /// Look the new extension on the next preview. The executable must exist again first, so
+    /// launchd never finds the path empty mid-swap.
+    private func restartWhenReplaced() {
+        guard let exe = Bundle.main.executablePath, let id = fileID(exe) else { return }
+        launchedExecutable = id
+        let folder = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
+        let callback: FSEventStreamCallback = { _, _, _, _, _, _ in
+            MainActor.assumeIsolated { AgentCore.shared.bundleMayHaveChanged() }
+        }
+        guard let s = FSEventStreamCreate(nil, callback, nil, [folder] as CFArray,
+                                          FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 1.0,
+                                          FSEventStreamCreateFlags(kFSEventStreamCreateFlagIgnoreSelf)) else { return }
+        FSEventStreamSetDispatchQueue(s, DispatchQueue.main)
+        FSEventStreamStart(s)
+        bundleEvents = s
+    }
+
+    private func bundleMayHaveChanged() {
+        replaceGeneration &+= 1
+        let generation = replaceGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            MainActor.assumeIsolated {
+                let me = AgentCore.shared
+                guard generation == me.replaceGeneration, let exe = Bundle.main.executablePath,
+                      let now = fileID(exe), now != me.launchedExecutable else { return }
+                Agent.log.notice("Peep.app was replaced: restarting into the new version")
+                HostApp.runTool("/usr/bin/killall", ["PeepPreview"])   // the old extension code
+                exit(0)
+            }
+        }
     }
 
     // MARK: - XPC
@@ -335,4 +378,11 @@ final class AgentCore {
         xpc_dictionary_set_string(msg, "chars", chars)
         xpc_connection_send_message(p.conn, msg)
     }
+}
+
+/// A file's identity (inode, modification time): a replaced file is a different one.
+private func fileID(_ path: String) -> [Int]? {
+    var st = stat()
+    guard stat(path, &st) == 0 else { return nil }
+    return [Int(st.st_dev), Int(st.st_ino), st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec]
 }

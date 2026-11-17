@@ -20,19 +20,27 @@ press Space, and get a syntax-highlighted (or rendered) preview. Press ⌘F to s
 Everything is native (Core Text, no web views) and dependency-free. Built for macOS 27 on
 Apple Silicon.
 
-## Building
-
-Requires the Xcode Command Line Tools.
+## Install
 
 ```sh
-Scripts/setup-signing.sh      # once: a local code-signing identity
-Scripts/build.sh install      # build, sign, install to /Applications
+brew install --cask lingrino/tap/peep
+open -a Peep
 ```
 
-Then open Peep.app once and grant Accessibility access when asked (Quick Look previews can't
-receive keystrokes; Peep's small background agent forwards ⌘F and friends).
+Opening Peep.app once starts its small background agent; grant it Accessibility access when
+asked (Quick Look previews can't receive keystrokes, so the agent forwards ⌘F and friends).
+Update with `brew upgrade --cask peep`: the agent restarts itself when its app is replaced.
 
 [Examples](Examples) has a sample of every supported file type to try it on.
+
+## Building
+
+Requires the Xcode Command Line Tools. `Scripts/build.sh install` builds, signs with the
+maintainer's Developer ID (`Scripts/setup-signing.sh`) and installs to /Applications; to
+build without it, `PEEP_SIGN_IDENTITY=- Scripts/build.sh install` (ad-hoc: Accessibility has
+to be granted again after each build). Every PR runs the checks in GitHub Actions, and every
+merge to main is released as 0.0.N: signed with a Developer ID, notarized, and published to
+the tap.
 
 ## Security and privacy
 
@@ -50,13 +58,14 @@ receive keystrokes; Peep's small background agent forwards ⌘F and friends).
   document's author can learn that it was viewed (and from which IP address). Only https
   images from public hosts are fetched (never `localhost` or the local network), without
   cookies, with size and time limits. Set `ImageStore.maxRemote` to 0 to turn them off.
-- **Code signing.** `Scripts/setup-signing.sh` creates a self-signed identity so the
-  Accessibility permission survives rebuilds. Its keychain password is stored in your login
-  keychain without an access prompt (builds would otherwise ask every time), so any program
-  running as you could sign code that macOS treats as Peep and that inherits the
-  Accessibility permission. If that matters more to you than convenience, delete the
-  identity (`security delete-keychain ~/Library/Keychains/peep-signing.keychain-db`) and
-  grant the permission again after each build.
+- **Code signing.** Releases are signed with a Developer ID and notarized. The maintainer's
+  local builds sign with the same Developer ID, so the Accessibility permission carries
+  across releases and local builds. `Scripts/setup-signing.sh` keeps it in a dedicated
+  keychain whose password sits in a file only your account can read (builds would otherwise
+  ask every time), so any program running as you could sign code that macOS treats as Peep
+  and that inherits the Accessibility permission. Builds signed ad-hoc
+  (`PEEP_SIGN_IDENTITY=-`) need no certificate, but the permission has to be granted again
+  after each one.
 
 `Scripts/check.sh` runs every test and check (about a minute), including generated hostile
 inputs (`Scripts/make-adversarial.py`). Architecture and development

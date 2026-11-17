@@ -23,7 +23,7 @@ enum HostApp {
 
     /// The keyboard agent is a classic per-user LaunchAgent (~/Library/LaunchAgents), not an
     /// SMAppService agent: SMAppService pins the executable's cdhash in a launch constraint,
-    /// which locally-signed builds (no Team ID) violate on every rebuild.
+    /// which every local rebuild violated while those builds had no Team ID.
     static var agentPlistPath: String {
         NSHomeDirectory() + "/Library/LaunchAgents/\(Agent.label).plist"
     }
@@ -63,9 +63,13 @@ enum HostApp {
     }
 
     @discardableResult
-    static func launchctl(_ args: [String]) -> Int32 {
+    static func launchctl(_ args: [String]) -> Int32 { runTool("/bin/launchctl", args) }
+
+    /// Runs a tool to completion, output discarded; its exit status (-1 if it didn't start).
+    @discardableResult
+    static func runTool(_ tool: String, _ args: [String]) -> Int32 {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.executableURL = URL(fileURLWithPath: tool)
         p.arguments = args
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
