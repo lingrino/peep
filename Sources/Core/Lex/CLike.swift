@@ -416,7 +416,7 @@ public enum CLike {
                 } else if s.regexLiterals && regexAllowed(prev, prevKeyword),
                           !(anyDialect && s.dialect == .swift && (n == 0x20 || n == 0x09 || n == 0x3D)),   // Swift: `a / b`, `/=` divide
                           !((prev == 0x2B || prev == 0x2D) && postfixStep(p, start, i)),     // `x++ / 2` divides
-                          let k = regex(p, i, end, cc) {
+                          let k = regex(p, i, end, cc, out) {
                     out.add(i, k, .regex); j = k
                 }
             case 0x23: // '#'
@@ -525,16 +525,7 @@ public enum CLike {
                 }
             case 0x24: // '$'
                 if s.csharpStrings && (p[i + 1] == quote || p[i + 1] == 0x24 || (p[i + 1] == 0x40 && p[i + 2] == quote)) {
-                    var q = i + 1
-                    while p[q] == 0x24 { q &+= 1 }   // $$"""...""" raw interpolated
-                    if p[q] == quote && p[q + 1] == quote && p[q + 2] == quote {
-                        j = csharpRaw(p, q, end); out.add(i, j, .string)
-                    } else if p[i + 1] == 0x40 {
-                        j = verbatimString(p, i + 2, end); out.add(i, j, .string)
-                    } else if p[q] == quote {
-                        out.add(i, q, .string)
-                        j = string(s, p, q, end, out, quote, multiline: false, escapes: true, interp: .braces)
-                    }
+                    j = csharpDollar(s, p, i, end, out)
                 } else if anyDialect && s.dialect == .erlang {   // $a, $\n: character codes
                     j = min(i + (p[i + 1] == 0x5C ? 3 : 2), end); out.add(i, j, .string)
                 } else if anyDialect && s.dialect == .perl && p[i + 1] == 0x23 && (cc.isIdentStart(p[i + 2]) || p[i + 2] == 0x7B || p[i + 2] == 0x24) {
@@ -613,7 +604,10 @@ public enum CLike {
         let limit = min(end, k + 4096)
         while k < limit {
             let c = p[k]
-            if c == 0x28 { depth += 1 } else if c == 0x29 { depth -= 1; if depth == 0 { break } }
+            // Parameter lists nest a few levels at most; past `maxParens` it's not one. (Without
+            // the cap `a f(` repeated scanned 4 KB per name: 0.57 s for 1 MB.)
+            if c == 0x28 { depth += 1; if depth > maxParens { return false } }
+            else if c == 0x29 { depth -= 1; if depth == 0 { break } }
             else if c == 0x7B || c == 0x7D || c == 0x3B { return false }
             k += 1
         }
@@ -651,7 +645,8 @@ public enum CLike {
             guard open == 0x28 || open == 0x7B else { return false }
             var depth = 0
             while k < limit {
-                if p[k] == open { depth += 1 } else if p[k] == close { depth -= 1; if depth == 0 { break } }
+                if p[k] == open { depth += 1; if depth > maxParens { return false } }
+                else if p[k] == close { depth -= 1; if depth == 0 { break } }
                 else if p[k] == 0x3B { return false }
                 k += 1
             }
@@ -728,18 +723,25 @@ public enum CLike {
         return i + 1
     }
 
-    /// From a `(` at `i` to just past its match, or nil (unbalanced within 4 KB).
+    /// From a `(` at `i` to just past its match, or nil (unbalanced within 4 KB, or nested
+    /// deeper than `maxParens`).
     static func parenEnd(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int? {
         var depth = 0
         var k = i
         let limit = min(end, i + 4096)
         while k < limit {
             let c = p[k]
-            if c == 0x28 { depth += 1 } else if c == 0x29 { depth -= 1; if depth == 0 { return k + 1 } }
+            if c == 0x28 { depth += 1; if depth > maxParens { return nil } }
+            else if c == 0x29 { depth -= 1; if depth == 0 { return k + 1 } }
             k += 1
         }
         return nil
     }
+
+    /// Declaration heuristics give up on parentheses nested deeper (real parameter lists and
+    /// values nest a few levels): each scan then stops within 32 `(`, so names repeated
+    /// before unclosed `(`s cost O(32) each instead of a 4 KB scan each.
+    static let maxParens = 32
 
     @inline(__always) static func skipBlank(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int {
         var k = i
@@ -1080,11 +1082,7 @@ public enum CLike {
             }
             if ch == backslash {
                 out.add(seg, k, .string)
-                if interp == .swift && p[k + 1] == 0x28 {
-                    out.add(k, k + 2, .escape)
-                    let r = lex(s, p, k + 2, end, out, closer: 0x29)
-                    let after = min(r + 1, end)
-                    out.add(r, after, .escape)
+                if interp == .swift && p[k + 1] == 0x28, let after = swiftHole(s, p, k, end, out) {
                     seg = after; j = after
                     continue
                 }
@@ -1103,6 +1101,22 @@ public enum CLike {
         }
         out.add(seg, j, .string)
         return j
+    }
+
+    /// Swift `\(expr)` at `k` (the backslash): delimiters as escapes, the expression lexed as
+    /// code; where the string continues. Nil when nested too deep (`TokenStream.nesting`):
+    /// then `\(` is an escape and the rest string text. Out of line: inlined, the nesting
+    /// bookkeeping grew `string`, which every string literal runs, by 11%.
+    @inline(never)
+    static func swiftHole(_ s: CLikeSpec, _ p: UnsafePointer<UInt8>, _ k: Int, _ end: Int, _ out: TokenStream) -> Int? {
+        if out.nesting >= TokenStream.maxNesting { return nil }
+        out.add(k, k + 2, .escape)
+        out.nesting &+= 1
+        let r = lex(s, p, k + 2, end, out, closer: 0x29)
+        out.nesting &-= 1
+        let after = min(r + 1, end)
+        out.add(r, after, .escape)
+        return after
     }
 
     /// The byte that opens an interpolation for `interp` (the quote itself when none).
@@ -1139,10 +1153,12 @@ public enum CLike {
                 return e
             }
         }
-        if open == 0 { return nil }
+        if open == 0 || out.nesting >= TokenStream.maxNesting { return nil }   // too deep: string text
         out.add(seg, k, kind)
         out.add(k, k + open, .escape)
+        out.nesting &+= 1
         let r = lex(s, p, k + open, end, out, closer: closer)
+        out.nesting &-= 1
         let after = min(r + 1, end)
         out.add(r, after, .escape)
         seg = after
@@ -1172,11 +1188,7 @@ public enum CLike {
             }
             if ch == backslash {
                 out.add(seg, k, .string)
-                if interp == .swift && p[k + 1] == 0x28 {
-                    out.add(k, k + 2, .escape)
-                    let r = lex(s, p, k + 2, end, out, closer: 0x29)
-                    let after = min(r + 1, end)
-                    out.add(r, after, .escape)
+                if interp == .swift && p[k + 1] == 0x28, let after = swiftHole(s, p, k, end, out) {
                     seg = after; j = after
                 } else {
                     let e = min(k + 2, end)
@@ -1190,6 +1202,24 @@ public enum CLike {
         }
         out.add(seg, min(j, end), .string)
         return min(j, end)
+    }
+
+    /// C# `$"..."`, `$@"..."`, `$$"""..."""` at the `$` at `i`: where lexing continues (`i + 1`
+    /// if it isn't one). Out of line: in `lex`'s loop body the delimiter cap's few
+    /// instructions slowed lexing 1-4% in every C-family language, without ever running.
+    @inline(never)
+    static func csharpDollar(_ s: CLikeSpec, _ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ out: TokenStream) -> Int {
+        var q = i + 1
+        while p[q] == 0x24 && q - i < maxDelimiterRun { q &+= 1 }   // $$"""...""" raw interpolated
+        if p[q] == quote && p[q + 1] == quote && p[q + 2] == quote {
+            let j = csharpRaw(p, q, end); out.add(i, j, .string); return j
+        } else if p[i + 1] == 0x40 {
+            let j = verbatimString(p, i + 2, end); out.add(i, j, .string); return j
+        } else if p[q] == quote {
+            out.add(i, q, .string)
+            return string(s, p, q, end, out, quote, multiline: false, escapes: true, interp: .braces)
+        }
+        return i + 1
     }
 
     /// C# verbatim @"..." ("" is an escaped quote, no backslash escapes). `i` at the quote.
@@ -1286,10 +1316,14 @@ public enum CLike {
         return nil
     }
 
+    /// Raw string and regex delimiters (`#`, C# `$`) longer than this aren't recognized: each
+    /// byte of a long run counted the rest of the run (Swift `#` repeated: 4.4 s for 128 KB).
+    static let maxDelimiterRun = 32
+
     /// Swift #"..."# / ##"..."## raw strings. `i` at the first '#'.
     static func swiftRaw(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int? {
         var h = i
-        while h < end && p[h] == 0x23 { h &+= 1 }
+        while h < end && p[h] == 0x23 && h - i < maxDelimiterRun { h &+= 1 }
         if h >= end || p[h] != quote { return nil }
         let hashes = h - i
         let triple = p[h + 1] == quote && p[h + 2] == quote
@@ -1409,16 +1443,40 @@ public enum CLike {
     }
 
     /// `/.../flags` on one line; nil if it doesn't close (then '/' was division).
-    static func regex(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ cc: ByteClass) -> Int? {
+    static func regex(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ cc: ByteClass, _ out: TokenStream) -> Int? {
+        if i > out.regexFrom && i < out.regexTo && end == out.regexEnd { return knownRegex(p, i, end, cc) }
         var j = i + 1
         var inClass = false
         while j < end {
             let ch = p[j]
-            if ch == newline { return nil }
+            if ch == newline { break }
             if ch == backslash { j &+= 2; continue }
             if ch == 0x5B { inClass = true }
             else if ch == 0x5D { inClass = false }
             else if ch == 0x2F && !inClass {
+                j &+= 1
+                while j < end && cc[p[j]] & ByteClass.lower != 0 { j &+= 1 }
+                return j
+            }
+            j &+= 1
+        }
+        out.regexFrom = i; out.regexTo = min(j, end); out.regexEnd = end
+        return nil
+    }
+
+    /// A regex from a `/` at `i` inside the failed search of `out.regexFrom` (same line): from
+    /// `i + 1` both searches step through the same bytes (a `\` skips the same next byte), and
+    /// at the first `[` or `]` they agree on being in a class; from there on the earlier one
+    /// found no closing `/`. So this one closes only at a `/` before any bracket. (Searching
+    /// again per `/` was quadratic: `;/[` repeated on a line, 13 s for 300 KB.)
+    @inline(never)
+    static func knownRegex(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ cc: ByteClass) -> Int? {
+        var j = i + 1
+        while j < end {
+            let ch = p[j]
+            if ch == newline || ch == 0x5B || ch == 0x5D { return nil }
+            if ch == backslash { j &+= 2; continue }
+            if ch == 0x2F {
                 j &+= 1
                 while j < end && cc[p[j]] & ByteClass.lower != 0 { j &+= 1 }
                 return j

@@ -54,6 +54,20 @@ public final class TokenStream: @unchecked Sendable {
     public private(set) var symbolKind: [UInt8] = []
     public private(set) var symbolTitleStart: [UInt32] = []
 
+    /// Lexers running inside another's text: string interpolation holes, tagged-template
+    /// languages, heredoc lines, shell `$(...)`. Each level is native stack frames, and input
+    /// can nest them without end: `${` 20,000 deep in a .js file overflowed the main thread's
+    /// stack (1,000 deep in a Markdown fence a layout thread's 512 KB), shell `$(` 300,000
+    /// deep also rescanned to its match per level (55 s, then a crash). At `maxNesting`
+    /// lexers stop nesting and take the rest of that construct as string or plain text.
+    /// Kept here, not in a lexer's locals: only the rare nesting branches touch it.
+    var nesting = 0
+    static let maxNesting = 32
+
+    /// The last regex literal that didn't close: the search from the `/` at `regexFrom` ran
+    /// into the line end at `regexTo` (lexing up to `regexEnd`). See `CLike.regex`.
+    var regexFrom = -1, regexTo = -1, regexEnd = -1
+
     public func addSymbol(_ start: Int, _ end: Int, _ kind: TokenKind, titleStart: Int) {
         symbolStart.append(UInt32(truncatingIfNeeded: start))
         symbolEnd.append(UInt32(truncatingIfNeeded: end))

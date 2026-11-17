@@ -99,7 +99,11 @@ extension CLike {
         if q != 0 { k += 1 }
         out.add(i, k, .string)
         let le = lineEnd(p, k, end)
-        if le > k { lex(s, p, k, le, out) }   // `<<~SQL.strip + x` / `print <<EOF;`
+        if le > k && out.nesting < TokenStream.maxNesting {   // `<<~SQL.strip + x` / `print <<EOF;`
+            out.nesting &+= 1   // (another heredoc on the line nests: `<<A <<B ...`)
+            lex(s, p, k, le, out)
+            out.nesting &-= 1
+        }
         var ls = min(le + 1, end)
         let interp: CLikeSpec.Interp = q == apos ? .none : s.interpolation
         let special = interpolationByte(interp, newline)
@@ -233,7 +237,7 @@ extension CLike {
     /// Swift `#/regex/#`, `##/.../##` (extended, may span lines). `i` at the first `#`.
     static func swiftRegex(_ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int) -> Int? {
         var h = i
-        while h < end && p[h] == 0x23 { h += 1 }
+        while h < end && p[h] == 0x23 && h - i < maxDelimiterRun { h += 1 }
         guard h < end, p[h] == 0x2F else { return nil }
         let hashes = h - i
         var j = h + 1
@@ -309,10 +313,16 @@ extension CLike {
     /// A template literal at `i` (the backtick) whose text is `lang`, with `${}` holes in JS.
     static func embeddedTemplate(_ s: CLikeSpec, _ p: UnsafePointer<UInt8>, _ i: Int, _ end: Int, _ out: TokenStream,
                                  _ lang: Language) -> Int {
+        // Too deep (html`<script>` holds JS again): a plain template string, whose holes stay text.
+        if out.nesting >= TokenStream.maxNesting {
+            return string(s, p, i, end, out, backtick, multiline: true, escapes: true, interp: .dollarBrace)
+        }
         // CSS-in-JS bodies are declaration lists with nesting: SCSS inside a block.
         @inline(__always) func text(_ a: Int, _ b: Int) {
             if b <= a { return }
+            out.nesting &+= 1
             if lang == .css { CSSLexer.lex(p, a, b, out, dialect: .scss, depth: 1); out.finish(b) } else { lang.lex(p, a, b, out) }
+            out.nesting &-= 1
         }
         out.add(i, i + 1, .string)
         var seg = i + 1, j = i + 1
@@ -324,7 +334,9 @@ extension CLike {
                 guard p[k + 1] == 0x7B else { j = k + 1; continue }
                 text(seg, k)
                 out.add(k, k + 2, .escape)
+                out.nesting &+= 1
                 let r = lex(s, p, k + 2, end, out, closer: 0x7D)
+                out.nesting &-= 1
                 let after = min(r + 1, end)
                 out.add(r, after, .escape)
                 seg = after; j = after

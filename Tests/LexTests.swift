@@ -303,4 +303,80 @@ let lexTests: [Test] = [
                     ["@interface G", "@implementation G", "hi:"])
         expectEqual(syms(.fortran, "module m\ncontains\n  function f(x)\n  end function f\nend module m\n"), ["module m", ">f"])
     },
+    Test("pathological: nesting is bounded") {
+        // Interpolation holes and embedded languages nested without end recursed natively:
+        // `${` 20,000 deep in .js overflowed the main thread's stack (1,000 deep in a Markdown
+        // fence, a 512 KB layout thread's), shell `$(` 300,000 deep took 55 s, then crashed.
+        // Past TokenStream.maxNesting the rest of the construct is string or plain text.
+        let cases: [(Language, String)] = [
+            (.javascript, "`${"), (.typescript, "`${"), (.swift, "\"\\("), (.swift, "\"\"\"\\("), (.kotlin, "\"${"),
+            (.ruby, "\"#{"), (.ruby, "%Q{#{"), (.ruby, "<<A "), (.python, "f\"{"), (.csharp, "$\"{"), (.dart, "'${"),
+            (.julia, "\"$("), (.perl, "qq{${"), (.php, "<<<A "), (.elixir, "~s(#{"), (.nix, "''${"),
+            (.shell, "$("), (.shell, "\"$("), (.shell, "<<A "), (.makefile, "\t$("), (.dockerfile, "RUN $("),
+            (.javascript, "html`<script>"), (.javascript, "css`a{${"), (.html, "<script>html`"),
+        ]
+        for (lang, unit) in cases {
+            let t0 = nanotime()
+            let toks = lexed(lang, String(repeating: unit, count: 20_000))   // (checks tiling)
+            let ms = Double(nanotime() - t0) / 1e6
+            expect(ms < 2000, "\(lang) \(unit): \(Int(ms)) ms")
+            expect(!toks.isEmpty, "\(lang) \(unit)")
+        }
+        // Below the limit, holes are code.
+        expectTokens(.javascript, "`a${`b${`c${1}`}`}`", contains: ["number:1"])
+        expectTokens(.shell, "echo $(a $(b $(c 1)))", contains: ["number:1"])
+    },
+    Test("pathological: regex literals that don't close") {
+        // Each `/` after a failed one searched to the line end again: 13 s for 300 KB.
+        let t0 = nanotime()
+        let toks = lexed(.javascript, String(repeating: ";/[", count: 100_000))
+        expect(Double(nanotime() - t0) / 1e6 < 2000)
+        expect(!toks.contains { $0.hasPrefix("regex:") })
+        // The shortcut after a failed search agrees with a full search from every `/`.
+        var rng = SystemRandomNumberGenerator()
+        let alphabet = Array("//[]\\a; (\n".utf8)
+        let cc = Specs.javascript.chars
+        for _ in 0..<500 {
+            var bytes: [UInt8] = []
+            for _ in 0..<60 { bytes.append(alphabet[Int.random(in: 0..<alphabet.count, using: &rng)]) }
+            let t = TextBuffer(String(decoding: bytes, as: UTF8.self))
+            let shared = TokenStream(expectedBytes: 16)
+            for i in 0..<t.count where t.base[i] == 0x2F {
+                let fresh = TokenStream(expectedBytes: 16)
+                expectEqual(CLike.regex(t.base, i, t.count, cc, shared), CLike.regex(t.base, i, t.count, cc, fresh),
+                            "at \(i) in \(String(decoding: bytes, as: UTF8.self).debugDescription)")
+            }
+        }
+        expectTokens(.javascript, "a = /[/; b = /c/g;", contains: ["regex:/; b = /c"])
+    },
+    Test("pathological: declaration scans stay short") {
+        // Each name before `(` scanned up to 4 KB for its `)`: `a f(` repeated, 0.57 s per MB.
+        for (lang, unit) in [(Language.c, "a f("), (.cpp, "a f() : g("), (.javascript, "const a = ("), (.csharp, "struct a (")] {
+            let t0 = nanotime()
+            _ = lexed(lang, String(repeating: unit, count: 20_000))
+            expect(Double(nanotime() - t0) / 1e6 < 2000, "\(lang) \(unit)")
+        }
+        // Parameter lists with nested parentheses still declare.
+        let t = TextBuffer("int apply(int (*cb)(int (*)(void)), int x) {\n}\n"), tk = TokenStream(expectedBytes: t.count)
+        Language.c.lex(t.base, 0, t.count, tk)
+        expectEqual(CodeOutline.symbols(t, LineIndex(t), tk).map(\.title), ["apply"])
+    },
+    Test("pathological: long delimiter runs") {
+        // Each `#` (Swift raw strings, regexes) or `$` (C# raw strings) counted the rest of
+        // its run: 4.4 s and 2.2 s for 128 KB.
+        for (lang, unit) in [(Language.swift, "#"), (.csharp, "$")] {
+            let t0 = nanotime()
+            _ = lexed(lang, String(repeating: unit, count: 100_000))
+            expect(Double(nanotime() - t0) / 1e6 < 2000, "\(lang) \(unit)")
+        }
+        expectTokens(.swift, "a = ##\"x\"##; b = #/y/#", contains: ["string:##\"x\"##", "regex:#/y/#"])
+        expectTokens(.csharp, "var s = $$\"\"\"{{x}}\"\"\";", contains: ["string:$$\"\"\"{{x}}\"\"\""])
+    },
+    Test("pathological: markdown source brackets") {
+        // Each `[` searched the rest of the line for a `]`.
+        let t0 = nanotime()
+        _ = lexed(.markdown, String(repeating: "[", count: 200_000) + "]")
+        expect(Double(nanotime() - t0) / 1e6 < 2000)
+        expectTokens(.markdown, "[a] [b](c) [d", contains: ["link:[b](c)"])
+    },
 ]

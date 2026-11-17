@@ -65,6 +65,20 @@ final class BlockParser {
     var htmlEnd = 0                  // HTML block end condition (1...7)
     var tableAlignStart = 0
 
+    /// Containers (quotes, items, footnote definitions) nest at most this deep; deeper markers
+    /// are paragraph text. Blocks carry their quote/list depths in a byte (more than 255 `>`
+    /// trapped), and nothing real comes close: markdown-it's default limit is 100 too.
+    static let maxNesting = 100
+
+    /// Table cells the parser may add to pad short rows to the header's width, per document,
+    /// beyond what the rows' own bytes pay for (a row of n bytes has at most n + 1 cells).
+    /// Unbounded, a 2,000-column header over 5,000 one-byte rows asked the renderer for 10
+    /// million cells from 28 KB (10 GB, minutes). Like cmark-gfm's limit on auto-completed
+    /// cells: past it, a short row ends the table and starts a paragraph. Real tables omit a
+    /// few trailing cells per row; 16,384 of them cost about what 32 KB of real cells do
+    /// (rendering a 65,536-cell table: 0.3 s, 340 MB).
+    var tablePadding = 1 << 14
+
     var blocks: RawArray<PendingBlock>
     var lines: RawArray<Int32>       // leaf content lines, pairs (start, end)
     var newlines: RawArray<UInt32>   // offset of every "\n" (see `run`)
@@ -199,7 +213,7 @@ final class BlockParser {
                 }
                 let plain = BlockParser.plainStart[Int(p[at])]
                 if ind < 4 && (plain == 1 || (plain == 2 && p[at + 1] != 0x5E)) {
-                    if leaf == .table { addLine(at, le); lastLineBlank = false; return }
+                    if leaf == .table && tableRowFits(at, le) { addLine(at, le); lastLineBlank = false; return }
                     if leaf != .paragraph { closeLeaf(); startLeaf(.paragraph) }
                     addLine(at, le)
                     itemStarted()
@@ -270,9 +284,9 @@ final class BlockParser {
             return
         }
 
-        // 3. New containers.
+        // 3. New containers (up to `maxNesting` open; see there).
         var opened = false
-        while true {
+        while stack.count < BlockParser.maxNesting {
             let (ind, at) = indentation(pos, le, col: col)
             if ind >= 4 || at >= le { break }
             let b = p[at]
@@ -413,7 +427,7 @@ final class BlockParser {
             }
         }
         if leaf == .table {
-            if startsBlock(at, le, col: col + ind) { closeLeaf() } else { addLine(at, le); return }
+            if startsBlock(at, le, col: col + ind) || !tableRowFits(at, le) { closeLeaf() } else { addLine(at, le); return }
         }
 
         // Only these bytes can start a non-paragraph leaf: most lines skip every recognizer.
@@ -947,6 +961,21 @@ final class BlockParser {
 
     func cellCount(_ s: Int, _ e: Int) -> Int {
         inline.splitCells(p, s, e)
+    }
+
+    /// The row `p[at..<le]` may join the open table: rendering pads it to the header's column
+    /// count, and the cells it can't pay for with its own bytes come out of `tablePadding`.
+    /// (A bound from the length: splitting every row's cells here as well would cost every
+    /// table.)
+    @inline(__always) func tableRowFits(_ at: Int, _ le: Int) -> Bool {
+        let unpaid = (aligns.count - tableAlignStart) - (le - at + 1)
+        return unpaid <= 0 || payTablePadding(unpaid)
+    }
+
+    @inline(never) func payTablePadding(_ cells: Int) -> Bool {
+        if cells > tablePadding { return false }
+        tablePadding -= cells
+        return true
     }
 
     /// Delimiter row candidate: only `|`, `-`, `:` and blanks, with a `-`. Cheap prefilter run

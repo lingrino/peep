@@ -633,7 +633,13 @@ public enum ShellLexer {
         if n == 0x28 {   // $( command ) / $(( arithmetic ))
             out.add(i, i + 2, .escape)
             let close = CLike.matchBracket(p, i + 1, end, 0x28, 0x29)
-            lex(p, i + 2, max(i + 2, close - 1), out)
+            // Too deep (`TokenStream.nesting`): the command stays plain text, skipped whole, so
+            // its own `$(`s aren't matched again either.
+            if out.nesting < TokenStream.maxNesting {
+                out.nesting &+= 1
+                lex(p, i + 2, max(i + 2, close - 1), out)
+                out.nesting &-= 1
+            }
             out.add(close - 1, close, .escape)
             return close
         }
@@ -660,7 +666,11 @@ public enum ShellLexer {
         out.add(i, j, .meta)
         // The rest of the opening line is commands: `cat <<EOF | grep x > out`.
         let first = lineEnd(p, j, end)
-        if first > j { lex(p, j, first, out) }
+        if first > j && out.nesting < TokenStream.maxNesting {   // (`<<A <<B ...` nests)
+            out.nesting &+= 1
+            lex(p, j, first, out)
+            out.nesting &-= 1
+        }
         // Body: from next line until a line that is exactly the tag (leading tabs allowed).
         // An unquoted tag expands `$var`, `${...}`, `$(...)` and backticks in the body.
         var ls = first + 1
@@ -835,6 +845,7 @@ public enum MarkdownSourceLexer {
 
     static func inline(_ p: UnsafePointer<UInt8>, _ s: Int, _ le: Int, _ out: TokenStream) {
         var j = s
+        var bracketClose = -1   // the first `]` after the last `[` searched from (`le`: none)
         while j < le {
             let k = findAny(p, j, le, 0x60, 0x2A, 0x5B, 0x5F)
             if k >= le { return }
@@ -843,7 +854,10 @@ public enum MarkdownSourceLexer {
                 let e = findAny(p, k + 1, le, 0x60, 0x60, 0x60, 0x60)
                 let stop = min(e + 1, le); out.add(k, stop, .code); j = stop
             case 0x5B:
-                let e = findAny(p, k + 1, le, 0x5D, 0x5D, 0x5D, 0x5D)
+                // Still the next `]` if it's past this `[` (`[` repeated searched the rest of
+                // the line from each: quadratic).
+                if bracketClose <= k { bracketClose = findAny(p, k + 1, le, 0x5D, 0x5D, 0x5D, 0x5D) }
+                let e = bracketClose
                 if e < le && p[e + 1] == 0x28 {
                     let c = findAny(p, e + 1, le, 0x29, 0x29, 0x29, 0x29)
                     let stop = min(c + 1, le); out.add(k, stop, .link); j = stop

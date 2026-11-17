@@ -75,6 +75,23 @@ func mdDump(_ src: String) -> [String] {
     return out
 }
 
+/// Parses pathological input that once took seconds to minutes (super-linear) or crashed;
+/// linear, each case here takes milliseconds even in a debug build. Fails past 2 s.
+func parseBounded(_ src: String, file: StaticString = #fileID, line: UInt = #line) -> MarkdownDocument {
+    let b = TextBuffer(src)
+    let t0 = nanotime()
+    let d = MarkdownParser.parse(b)
+    let ms = Double(nanotime() - t0) / 1e6
+    expect(ms < 2000, "parse took \(Int(ms)) ms", file: file, line: line)
+    return d
+}
+
+/// Rendered text of block `i`.
+func blockText(_ d: MarkdownDocument, _ i: Int) -> String {
+    let b = d.blocks[i]
+    return String(decoding: UnsafeBufferPointer(start: d.text.base + Int(b.textStart), count: Int(b.textEnd - b.textStart)), as: UTF8.self)
+}
+
 func expectMD(_ src: String, _ want: [String], file: StaticString = #fileID, line: UInt = #line) {
     let got = mdDump(src)
     if got != want {
@@ -264,5 +281,120 @@ let markdownTests: [Test] = [
             }
             for r in d.runs { expect(r.start < r.end && Int(r.end) <= d.text.count, "bad run") }
         }
+    },
+    Test("md: container nesting is capped") {
+        // 256 nested quotes or lists trapped on a byte-sized depth (crashed the previewer).
+        // Containers stop at BlockParser.maxNesting; deeper markers are paragraph text.
+        let cap = BlockParser.maxNesting
+        var d = parseBounded(String(repeating: ">", count: 300) + " x\n" + String(repeating: ">", count: 300) + " y")
+        expectEqual(d.blocks.count, 1)
+        expectEqual(Int(d.blocks[0].quoteDepth), cap)
+        expectEqual(blockText(d, 0), String(repeating: ">", count: 300 - cap) + " x " + String(repeating: ">", count: 300 - cap) + " y")
+        d = parseBounded((0..<300).map { String(repeating: "  ", count: $0) + "- x" }.joined(separator: "\n"))
+        expectEqual(d.blocks.map { Int($0.listDepth) }.max(), cap)
+        for i in d.blocks.indices { expect(blockText(d, i).hasSuffix("x")) }
+        d = parseBounded(String(repeating: "- ", count: 300) + "x")
+        expectEqual(d.blocks.count, cap)   // (the outer items are empty)
+        expectEqual(Int(d.blocks[0].listDepth), cap)
+        expectEqual(blockText(d, 0), String(repeating: "- ", count: 300 - cap) + "x")
+        d = parseBounded(String(repeating: "> - ", count: 200) + "x")
+        expectEqual(Int(d.blocks[0].quoteDepth) + Int(d.blocks[0].listDepth), cap)
+        // Footnote definitions count too; their blocks render one list level deeper.
+        d = parseBounded("a[^1]\n\n[^1]: " + String(repeating: "- ", count: 300) + "x")
+        expectEqual(d.blocks.map { Int($0.listDepth) }.max(), cap)
+        // Below the cap nothing changes.
+        expectMD(">>> a\n- - - b", ["Q3P|a", "L3•tP|b", "L2•tP|", "L1•tP|"])
+    },
+    Test("md: link destinations nest at most 32 parentheses") {
+        let open = String(repeating: "(", count: 32), close = String(repeating: ")", count: 32)
+        var d = parseBounded("[a](x" + open + "y" + close + ")")
+        expectEqual(Array(d.links), ["x" + open + "y" + close])
+        d = parseBounded("[b](x(" + open + "y" + close + "))")
+        expectEqual(d.links.count, 0)
+        // `[a](` repeated scanned the rest of the block per `](`: 3.4 s for 200 KB.
+        let src = String(repeating: "[a](", count: 20_000)
+        let e = parseBounded(src)
+        expectEqual(e.links.count, 0)
+        expectEqual(blockText(e, 0), src)
+    },
+    Test("md: link titles that never close") {
+        // Each `](x (` searched to the end of the block for its `)`: 2.7 s for 210 KB.
+        let src = String(repeating: "[a](x (", count: 30_000)
+        var d = parseBounded(src)
+        expectEqual(d.links.count, 0)
+        expectEqual(blockText(d, 0), src)
+        d = parseBounded(String(repeating: "[a](x \"", count: 30_000) + "[b](y 't')")
+        expectEqual(Array(d.links), ["y"])
+        // A failed search doesn't hide a title that closes later with another quote.
+        expectMD("[a](x \"t) [b](y 'u') [c](z (v))", ["P|[a](x \"t) [b](y) [c](z)"])
+    },
+    Test("md: nested images and alt text") {
+        // `![` x 40,000 then `](b)` x 40,000 walked every inner node per image: 3.6 s.
+        let n = 40_000
+        var d = parseBounded(String(repeating: "![", count: n) + String(repeating: "](b)", count: n))
+        expectEqual(d.images.count, n)
+        expectEqual(blockText(d, 0), "\u{FFFC}")
+        // Alt text includes nested images' alt; nesting `![a` repeated would build quadratic
+        // alt text (800 MB here), so nested alts stop once they total the source size.
+        let src = String(repeating: "![a", count: 20_000) + String(repeating: "](b)", count: 20_000)
+        d = parseBounded(src)
+        expectEqual(d.images.count, 20_000)
+        expectEqual(d.images[0].alt, "a")
+        expectEqual(d.images[1].alt, "aa")
+        expectEqual(d.images[2].alt, "aaa")
+        expect(d.images.reduce(0) { $0 + $1.alt.utf8.count } <= 3 * src.utf8.count + 8192)
+        expectMD("![a ![b *c*](u) d](v)", ["P|![a b c d](v)"])
+    },
+    Test("md: many link openers") {
+        // Each link re-flagged every open `[` as inactive: 0.9 s for 280 KB.
+        let n = 40_000
+        let d = parseBounded(String(repeating: "[", count: n) + String(repeating: "[a](b)", count: n))
+        expectEqual(d.links.count, n)
+        expectEqual(blockText(d, 0), String(repeating: "[", count: n) + String(repeating: "a", count: n))
+        expectMD("[a [b](c) d](e) [f](g)", ["P|[a [b](c) d](e) [f](g)"])
+    },
+    Test("md: reference labels of long bracketed text") {
+        // With any definition, each `]` built the label text of everything since its `[`:
+        // `[` x 40,000 then `]` x 40,000 took 5 s. Labels are at most 999 bytes.
+        let n = 40_000
+        let d = parseBounded("[x]: /u\n\n" + String(repeating: "[", count: n) + String(repeating: "]", count: n) + " [x]")
+        expectEqual(Array(d.links), ["/u"])
+        let long = String(repeating: "y", count: 1000)
+        expectMD("[\(long.dropLast())]: /a\n\n[\(long.dropLast())] [\(long)]", ["P|[\(long.dropLast())](/a) [\(long)]"])
+    },
+    Test("md: autolinks ending in many parentheses") {
+        // Each trailing `)` recounted the link's parentheses: 1.6 s for 100 KB.
+        let d = parseBounded("www.a.com" + String(repeating: ")", count: 100_000))
+        expectEqual(Array(d.links), ["http://www.a.com"])
+        expectMD("www.a.com/x(y)) www.b.com/(z))).", ["P|[www.a.com/x(y)](http://www.a.com/x(y))) [www.b.com/(z)](http://www.b.com/(z))))."])
+    },
+    Test("md: backtick runs of many lengths") {
+        // Each run searched the rest of the block for a run as long: n^1.5 (240 ms per MB).
+        var src = ""
+        for k in 1..<700 { src += String(repeating: "`", count: k) + "a" }
+        let d = parseBounded(src)
+        expect(d.runs.isEmpty)
+        expectEqual(blockText(d, 0), src)
+        // After a search fails, spans of other lengths still close.
+        expectMD("`a ``b`` ``c", ["P|`a `b` ``c"])
+        expectMD("``` a `` b ` c `` d\n\n`x`", ["P|``` a `b ` c` d", "P|`x`"])
+        // Runs over 1,000 backticks are text, as in cmark.
+        let long = String(repeating: "`", count: 1001)
+        expectMD(long + "x" + long, ["P|" + long + "x" + long])
+    },
+    Test("md: wide tables pad a bounded number of cells") {
+        // A 2,000-column header over one-byte rows asked for 10 million cells from 18 KB
+        // (10 GB rendering). Short rows past the padding budget end the table.
+        let cols = 2000
+        let header = Array(repeating: "a", count: cols).joined(separator: "|")
+        let delim = Array(repeating: "-", count: cols).joined(separator: "|")
+        let d = parseBounded(header + "\n" + delim + "\n" + String(repeating: "x\n", count: 5000))
+        expectEqual(d.tables.count, 1)
+        expect(d.tables[0].cells.count <= 16_384 + 2 * cols, "\(d.tables[0].cells.count) cells")
+        expectEqual(d.blocks.count, 2)
+        expectEqual(d.blocks[1].kind, .paragraph)
+        // Rows short of a few cells still pad.
+        let t = parseBounded("| a | b | c |\n|---|---|---|\n| x |\n| y | z |")
+        expectEqual(t.tables[0].cells.count, 9)
     },
 ]

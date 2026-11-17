@@ -44,6 +44,16 @@ final class InlineParser {
     var tail: Int32 = -1
     var delims: RawArray<Int32>
     var brackets: RawArray<Bracket>
+    /// `[` openers in `brackets` below this index are inactive: a link formed while they were
+    /// open, and links can't contain links. (One index instead of a flag set on every open
+    /// opener per link: `[` repeated, then links, re-flagged all of them for each link.)
+    var linkFloor = 0
+    /// Where a link title's search for its closing `"`, `'` or `)` ran off the end of the
+    /// block: a search for the same byte from there on fails as well. (Each `](x (` searched
+    /// to the end again: quadratic.)
+    var titleOpenEnd: (Int, Int, Int) = (.max, .max, .max)
+    /// Counts `parse` calls: the code span closer table (`tickLast`) describes block `tickBlock`.
+    var blockSerial = 0
     var scratch: ByteBuf
     /// The current block's input; text nodes without `fScratch` index it.
     var src: UnsafePointer<UInt8>
@@ -75,6 +85,20 @@ final class InlineParser {
     var sawRule = false
     /// `<picture><source media=dark srcset=...>` seen; applies to the next image.
     var pendingDark = StrRange.none
+    /// Bytes of nested images' alt text that enclosing images may still copy into theirs (an
+    /// image's alt is all the text inside it, nested images' included). Each copy is bounded
+    /// by the source, but `![a` repeated nests every alt in every enclosing one: quadratic
+    /// output (`![a` x 40,000 built 800 MB of alt text). Past the budget nested alts are left out.
+    var nestedAltBudget: Int
+    /// Code spans: the start of the last backtick run of each length (index = length, up to
+    /// `maxTicks`) in the rest of block `tickBlock`, built when a search for a closing run
+    /// first runs off the end of a block. Then a search with no closer left fails at once:
+    /// runs of distinct lengths each searched the rest of the block (n^1.5; 240 ms per MB).
+    /// cmark keeps the same table.
+    var tickLast: UnsafeMutablePointer<Int32>?
+    var tickBlock = -1
+    /// Longer backtick runs are literal text, as in cmark (they can't index the table).
+    static let maxTicks = 1000
 
     // Link reference definitions: open addressing on normalized label bytes (kept in
     // `strings`), so resolving `[text]` allocates nothing.
@@ -106,6 +130,7 @@ final class InlineParser {
         src = UnsafePointer(scratch.p)
         out = ByteBuf(capacity: n + n / 16 + 64)
         strings = ByteBuf(capacity: 256)
+        nestedAltBudget = n + 4096
     }
 
     deinit {
@@ -113,6 +138,7 @@ final class InlineParser {
         gather.free(); label.free(); tmp.free(); cells.free(); attrList.free()
         runs.free(); links.free(); images.free()
         refSlots?.deallocate()
+        tickLast?.deallocate()
         if !finished { out.free(); strings.free() }
     }
 
@@ -199,6 +225,9 @@ final class InlineParser {
         nodes.count = 0
         delims.count = 0
         brackets.count = 0
+        linkFloor = 0
+        titleOpenEnd = (.max, .max, .max)
+        blockSerial &+= 1
         scratch.count = 0
         head = -1
         tail = -1
@@ -315,7 +344,7 @@ final class InlineParser {
                 var k = i
                 while k < n && p[k] == 0x60 { k += 1 }
                 let ticks = k - i
-                if let close = InlineParser.findCodeClose(p, k, n, ticks) {
+                if let close = codeClose(p, k, n, ticks) {
                     flush(i)
                     codeSpan(p, k, close)
                     i = close + ticks
@@ -346,7 +375,8 @@ final class InlineParser {
             case 0x21: // ![
                 if i + 1 < n && p[i + 1] == 0x5B {
                     flush(i)
-                    let idx = add(InlineParser.kBracket, flags: 1)
+                    // `a`: where the bracketed text starts (for its length, `closeBracket`).
+                    let idx = add(InlineParser.kBracket, a: Int32(truncatingIfNeeded: i + 2), flags: 1)
                     brackets.append(Bracket(node: idx, delimBottom: Int32(delims.count)))
                     i += 2
                     textStart = i
@@ -373,7 +403,7 @@ final class InlineParser {
                     textStart = i
                     continue
                 }
-                let idx = add(InlineParser.kBracket)
+                let idx = add(InlineParser.kBracket, a: Int32(truncatingIfNeeded: i + 1))
                 brackets.append(Bracket(node: idx, delimBottom: Int32(delims.count)))
                 i += 1
                 textStart = i
@@ -467,6 +497,44 @@ final class InlineParser {
 
     // MARK: - Code spans
 
+    /// Start of the run of exactly `ticks` backticks that closes a code span opened by the run
+    /// ending at `k`, or nil. The search is plain until one runs off the end of the block;
+    /// then `tickLast` answers (see there).
+    @inline(__always)
+    func codeClose(_ p: UnsafePointer<UInt8>, _ k: Int, _ n: Int, _ ticks: Int) -> Int? {
+        if tickBlock != blockSerial && ticks <= InlineParser.maxTicks {
+            if let c = InlineParser.findCodeClose(p, k, n, ticks) { return c }
+            noCodeClose(p, k, n)
+            return nil
+        }
+        return knownCodeClose(p, k, n, ticks)
+    }
+
+    /// A search from `k` found no closer: records the last run of each length in `[k, n)`.
+    /// (The tokenizer only moves forward, so later searches start inside that range.)
+    @inline(never)
+    func noCodeClose(_ p: UnsafePointer<UInt8>, _ k: Int, _ n: Int) {
+        let t = tickLast ?? .allocate(capacity: InlineParser.maxTicks + 1)
+        tickLast = t
+        t.initialize(repeating: -1, count: InlineParser.maxTicks + 1)
+        var j = findAny(p, k, n, 0x60, 0x60, 0x60, 0x60)
+        while j < n {
+            var e = j + 1
+            while e < n && p[e] == 0x60 { e += 1 }
+            if e - j <= InlineParser.maxTicks { t[e - j] = Int32(truncatingIfNeeded: j) }
+            j = findAny(p, e, n, 0x60, 0x60, 0x60, 0x60)
+        }
+        tickBlock = blockSerial
+    }
+
+    /// Once the table is built: no closer if the last run as long starts before `k`, else the
+    /// search finds it (and the span consumes everything up to it).
+    @inline(never)
+    func knownCodeClose(_ p: UnsafePointer<UInt8>, _ k: Int, _ n: Int, _ ticks: Int) -> Int? {
+        guard ticks <= InlineParser.maxTicks, Int(tickLast![ticks]) >= k else { return nil }
+        return InlineParser.findCodeClose(p, k, n, ticks)
+    }
+
     static func findCodeClose(_ p: UnsafePointer<UInt8>, _ i: Int, _ n: Int, _ ticks: Int) -> Int? {
         var k = i
         while k < n {
@@ -511,8 +579,8 @@ final class InlineParser {
         let opener = brackets.last.node
         let delimBottom = Int(brackets.last.delimBottom)
         let isImage = nodes[Int(opener)].flags & 1 != 0
-        if nodes[Int(opener)].flags & 2 != 0 {   // inactive
-            brackets.removeLast()
+        if !isImage && brackets.count - 1 < linkFloor {   // inactive
+            popBracket()
             text(i, i + 1)
             return i + 1
         }
@@ -528,25 +596,31 @@ final class InlineParser {
             }
         }
         if dest.isNone && refCount > 0 {   // no definitions: skip building and folding labels
+            // The bracketed text is the label of a collapsed or shortcut reference only within
+            // a label's 999 bytes (as `findLabelEnd`). Checked first: building the text walks
+            // every node in it, and with `[` repeated then `]` repeated each `]` walked all
+            // the ones before it.
+            let textIsLabel = i - Int(nodes[Int(opener)].a) <= 999
             var haveText = false
             if i + 1 < n && p[i + 1] == 0x5B, let close = InlineParser.findLabelEnd(p, i + 2, n) {
                 if close > i + 2 {
                     normalizeLabel(p + i + 2, close - i - 2)
-                } else {
+                    if let r = findRef() { dest = r; end = close + 1 }
+                } else if textIsLabel {
                     linkText(from: opener)
                     haveText = true
                     normalizeLabel(UnsafePointer(tmp.p), tmp.count)
+                    if let r = findRef() { dest = r; end = close + 1 }
                 }
-                if let r = findRef() { dest = r; end = close + 1 }
             }
-            if dest.isNone {
+            if dest.isNone && textIsLabel {
                 if !haveText { linkText(from: opener) }
                 normalizeLabel(UnsafePointer(tmp.p), tmp.count)
                 if let r = findRef() { dest = r; end = i + 1 }
             }
         }
         guard !dest.isNone else {
-            brackets.removeLast()
+            popBracket()
             text(i, i + 1)
             return i + 1
         }
@@ -562,20 +636,26 @@ final class InlineParser {
             images.append(img)
             nodes[Int(opener)].kind = InlineParser.kImageOpen
             nodes[Int(opener)].c = ref
-            add(InlineParser.kImageClose, c: ref)
+            // `b`: the image's close node, for walks that skip over it (`linkText`). (Two
+            // statements: `add` may move `nodes`.)
+            let close = add(InlineParser.kImageClose, c: ref)
+            nodes[Int(opener)].b = close
         } else {
             let ref = Int32(links.count)
             links.append(dest)
             nodes[Int(opener)].kind = InlineParser.kLinkOpen
             nodes[Int(opener)].c = ref
             add(InlineParser.kLinkClose, c: ref)
-            // No links inside links: deactivate earlier [ openers.
-            for k in 0..<brackets.count where nodes[Int(brackets[k].node)].flags & 1 == 0 {
-                nodes[Int(brackets[k].node)].flags |= 2
-            }
+            // No links inside links: earlier [ openers are inactive.
+            linkFloor = brackets.count - 1
         }
-        brackets.removeLast()
+        popBracket()
         return end
+    }
+
+    @inline(__always) func popBracket() {
+        brackets.removeLast()
+        if linkFloor > brackets.count { linkFloor = brackets.count }
     }
 
     /// Plain text of the nodes after `opener` (reference labels, image alt text), into `tmp`.
@@ -592,10 +672,23 @@ final class InlineParser {
                 for _ in 0..<Int(nd.a) { tmp.append(UInt8(truncatingIfNeeded: nd.c)) }
             case InlineParser.kSoft, InlineParser.kHard:
                 tmp.append(0x20)
+            case InlineParser.kImageOpen:
+                // A nested image: its alt text (built from these same nodes when it closed),
+                // then on after it. Walking its nodes again made nested images quadratic.
+                appendNestedAlt(images[Int(nd.c)].alt)
+                k = nodes[Int(nd.b)].next
+                continue
             default: break
             }
             k = nd.next
         }
+    }
+
+    @inline(never) func appendNestedAlt(_ alt: StrRange) {
+        let len = Int(alt.end - alt.start)
+        guard len > 0 && len <= nestedAltBudget else { return }
+        nestedAltBudget -= len
+        tmp.append(UnsafePointer(strings.p) + Int(alt.start), len)
     }
 
     static func findLabelEnd(_ p: UnsafePointer<UInt8>, _ i: Int, _ n: Int) -> Int? {
@@ -632,8 +725,15 @@ final class InlineParser {
             // The title is validated but not kept (nothing renders it).
             let close: UInt8 = p[k] == 0x28 ? 0x29 : p[k]
             var e = k + 1
+            // A search from before here already ran off the end (see `titleOpenEnd`). (A title
+            // follows whitespace, never a `\`, so both searches step through the same bytes.)
+            let known = close == 0x22 ? titleOpenEnd.0 : close == 0x27 ? titleOpenEnd.1 : titleOpenEnd.2
+            if e >= known { return nil }
             while e < n && p[e] != close { if p[e] == 0x5C { e += 1 }; e += 1 }
-            if e >= n { return nil }
+            if e >= n {
+                if close == 0x22 { titleOpenEnd.0 = k + 1 } else if close == 0x27 { titleOpenEnd.1 = k + 1 } else { titleOpenEnd.2 = k + 1 }
+                return nil
+            }
             k = InlineParser.skipWS(p, e + 1, n)
         }
         if k >= n || p[k] != 0x29 { return nil }
@@ -667,7 +767,10 @@ final class InlineParser {
                 escapes = true
                 k = j + 1 < n && isASCIIPunct(p[j + 1]) ? j + 2 : j + 1
             } else if c == 0x28 {
+                // At most 32 nested, as in cmark (the spec allows a limit): unbounded, each `](`
+                // of `[a](` repeated scanned the rest of the block. Ending at the `(` fails the link.
                 depth += 1
+                if depth > 32 { return (j, escapes) }
                 k = j + 1
             } else if c == 0x29 {
                 if depth == 0 { return (j, escapes) }
@@ -961,15 +1064,20 @@ final class InlineParser {
         let hostStart = k
         while k < n && p[k] > 0x20 && p[k] != 0x3C { k += 1 }
         if k == hostStart { return nil }
+        // Parentheses in the link, counted at the first trailing `)` and kept current as the
+        // end moves back (a recount per trailing `)` was quadratic in a run of them).
+        var open = -1, close = 0
         while k > hostStart {
             let c = p[k - 1]
             if c == 0x3F || c == 0x21 || c == 0x2E || c == 0x2C || c == 0x3A || c == 0x2A || c == 0x5F || c == 0x7E || c == 0x27 || c == 0x22 {
                 k -= 1; continue
             }
             if c == 0x29 {
-                var open = 0, close = 0
-                for j in i..<k { if p[j] == 0x28 { open += 1 } else if p[j] == 0x29 { close += 1 } }
-                if close > open { k -= 1; continue }
+                if open < 0 {
+                    open = 0
+                    for j in i..<k { if p[j] == 0x28 { open += 1 } else if p[j] == 0x29 { close += 1 } }
+                }
+                if close > open { k -= 1; close -= 1; continue }
             }
             break
         }
