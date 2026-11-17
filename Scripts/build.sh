@@ -80,6 +80,9 @@ else
 fi
 codesign --force "${SIGN[@]}" --options runtime --entitlements Bundle/PeepPreview.entitlements "$APPEX"
 codesign --force "${SIGN[@]}" --options runtime --entitlements Bundle/Peep.entitlements "$APP"
+# Locked again between builds: while unlocked, any process could sign with the identity just
+# by running codesign (see README, Security and privacy).
+[[ -n "${KCPW:-}" ]] && security lock-keychain "$KC"
 echo "built $APP"
 
 if [[ "${1:-}" == install ]]; then

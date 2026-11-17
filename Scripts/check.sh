@@ -2,7 +2,8 @@
 # Everything that must pass before a commit, in one command (~1 min). Exit 1 on any failure;
 # each step's output goes to .build/check/<step>.log. Run it first when coming back to the
 # project, and after any macOS or toolchain update.
-#   Scripts/check.sh             # tests, warnings, builds, view checks over Examples and the docs
+#   Scripts/check.sh             # tests, warnings, builds, view checks over Examples, the docs
+#                                # and generated hostile inputs (Scripts/make-adversarial.py)
 #   Scripts/check.sh --corpus    # also smoke + link check .build/corpus (Scripts/make-corpus.sh)
 set -uo pipefail
 zmodload zsh/datetime   # EPOCHREALTIME
@@ -17,7 +18,9 @@ clean() {
   local out rc
   out=$("$@" 2>&1); rc=$?
   print -r -- "$out"
-  [[ $rc == 0 ]] && ! print -r -- "$out" | grep -qE '\.swift:[0-9]+:[0-9]+: (warning|error):'
+  # (Not grep -q: it exits at the first match, print then dies of SIGPIPE on long output, and
+  # pipefail + ! turned that into a pass.)
+  [[ $rc == 0 ]] && ! print -r -- "$out" | grep -E '\.swift:[0-9]+:[0-9]+: (warning|error):' >/dev/null
 }
 
 report() {   # report <name> <status> <seconds>
@@ -59,7 +62,10 @@ print "view checks"
 step smoke     $DEV smoke Examples AGENTS.md README.md
 step tilecheck $DEV tilecheck $TILE
 step linkcheck $DEV linkcheck $MD
-step geometry  zsh -c 'for f in "$@"; do '$DEV' layout "$f" 420 | grep -q "GEOMETRY ERRORS" && { echo "$f"; exit 1 }; done; exit 0' _ $MD
+step geometry  zsh -c 'for f in "$@"; do out=$('$DEV' layout "$f" 420) || { echo "$f: layout failed"; exit 1 }
+  [[ $out == *"GEOMETRY ERRORS"* ]] && { echo "$f"; exit 1 }; done; exit 0' _ $MD
+python3 -I Scripts/make-adversarial.py .build/adversarial
+step adversarial $DEV smoke --budget 1500 --max-mb 3000 --images .build/adversarial   # crashes, traps, runaway work
 
 if [[ ${1:-} == --corpus ]]; then
   if [[ -d .build/corpus/files ]]; then

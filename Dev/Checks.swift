@@ -9,6 +9,18 @@ import AppKit
 func smoke(_ args: [String]) {
     var files: [String] = []
     let fm = FileManager.default
+    // --budget ms: fail files whose whole pass takes longer; --max-mb N: fail when the process
+    // footprint exceeds N MB after a file; --images: wait (up to 2 s) for markdown images.
+    var args = args
+    func option(_ name: String) -> Double? {
+        guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+        defer { args.removeSubrange(i...i + 1) }
+        return Double(args[i + 1])
+    }
+    let budget = option("--budget") ?? .infinity
+    let maxMB = option("--max-mb") ?? .infinity
+    let waitImages = args.contains("--images")
+    args.removeAll { $0 == "--images" }
     for a in args {
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: a, isDirectory: &isDir), isDir.boolValue {
@@ -34,6 +46,11 @@ func smoke(_ args: [String]) {
         view.layoutSubtreeIfNeeded()
         view.cacheDisplay(in: view.bounds, to: rep)
         let first = Double(nanotime() - t0) / 1e6
+        if waitImages, let md = doc.content as? MarkdownContent {
+            let until = Date(timeIntervalSinceNow: 2)
+            while md.images.loading && Date() < until { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))   // the coalesced relayout
+        }
         let h = view.documentView.bounds.height
         for y in [h / 2, h] {
             view.documentView.scrollToTop(y: y)
@@ -48,6 +65,10 @@ func smoke(_ args: [String]) {
         view.documentView.selectAll()
         view.cacheDisplay(in: view.bounds, to: rep)
         view.clearFind()
+        let whole = Double(nanotime() - t0) / 1e6
+        if whole > budget { print(String(format: "SLOW %@: %.0f ms (budget %.0f)", f, whole, budget)); checkFailures += 1 }
+        let mb = Double(footprint()) / 1e6
+        if mb > maxMB { print(String(format: "MEMORY %@: %.0f MB (limit %.0f)", f, mb, maxMB)); checkFailures += 1 }
         total += first
         worst.append((first, (f as NSString).lastPathComponent))
         if (i + 1) % 200 == 0 { print("\(i + 1)/\(files.count)") }
@@ -114,6 +135,26 @@ func tileCheck(_ args: [String]) {
                 if gaps <= 5 { print("  gap at tile row \(g.row) col \(g.col) after \(what) (visible y \(Int(clip.bounds.minY)))") }
             }
         }
+        // Deterministic first: a fresh document (markdown background layout pending; nothing
+        // here spins the run loop) scrolled to its estimated end, at several heights, so that
+        // exact layout grows the document while tiles are being placed. The last target puts
+        // the visible bottom 100 pt into the tile row after the estimated end.
+        for h in [600, 800, 1100] {
+            for over in [0.0, 150.0, -1.0] {
+                let d = Document.open(path: f)
+                window.setContentSize(NSSize(width: 990, height: CGFloat(h)))
+                view.frame = NSRect(x: 0, y: 0, width: 990, height: CGFloat(h))
+                view.show(d)
+                view.layoutSubtreeIfNeeded()
+                let docH = view.documentView.bounds.height, ts = DocumentView.tileSize
+                let y = over >= 0 ? max(0, docH - clip.bounds.height) + over
+                                  : ((docH / ts).rounded(.down) + 1) * ts + 100 - clip.bounds.height
+                clip.setBoundsOrigin(NSPoint(x: 0, y: y)); check("fresh, scrolled to \(Int(y)) (estimated height \(Int(docH))) at height \(h)")
+                clip.setBoundsOrigin(NSPoint(x: 0, y: max(0, view.documentView.bounds.height - clip.bounds.height))); check("fresh, settle at end at height \(h)")
+            }
+        }
+        view.show(doc)
+        view.layoutSubtreeIfNeeded()
         for _ in 0..<400 {
             let maxY = max(0, view.documentView.bounds.height - clip.bounds.height)
             switch Int.random(in: 0..<5, using: &rng) {
@@ -195,4 +236,14 @@ func imgDiff(_ args: [String]) {
     if n == 0 { print("identical (\(a.w)x\(a.h))"); return }
     print("\(n) pixels differ; x \(x0)-\(x1), y \(y0)-\(y1) (top-left origin) of \(a.w)x\(a.h)")
     checkFailures += 1
+}
+
+/// The process's physical footprint (what Activity Monitor calls memory), in bytes.
+func footprint() -> UInt64 {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+    }
+    return kr == KERN_SUCCESS ? info.phys_footprint : 0
 }

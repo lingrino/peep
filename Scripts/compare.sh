@@ -57,8 +57,8 @@ bench)
   [[ $# -gt 0 ]] || { echo "usage: compare.sh bench [--rev R] [--rounds N] <peep-dev args...>"; exit 2; }
   for i in {1..$rounds}; do
     echo "-- round $i"
-    $BASE "$@" 2>&1 | sed "s/^/  $rev: /"
-    $NEW "$@" 2>&1 | sed "s/^/  new: /"
+    $BASE "$@" 2>&1 | awk -v p="  $rev: " '{ print p $0 }'   # (sed broke on revs like origin/main)
+    $NEW "$@" 2>&1 | awk -v p="  new: " '{ print p $0 }'
   done
   ;;
 *)
