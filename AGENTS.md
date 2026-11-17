@@ -461,4 +461,5 @@ as a fix with a test), and stay clean under `-sanitize=address`.
   tiny helpers. Comment *why* for every non-obvious performance trick.
 - Tests: `Tests/*.swift`, registered in `Tests/main.swift`. Fuzz-ish robustness tests exist for
   lexers and markdown — keep them passing.
-- Commit messages: imperative summary + body explaining why; end with the co-author trailer.
+- Commit messages: imperative summary + body explaining why. No AI attribution (no
+  co-author trailers, no generated-by lines): commits are the owner's.
