@@ -61,3 +61,9 @@ receive keystrokes; Peep's small background agent forwards ⌘F and friends).
 `Scripts/check.sh` runs every test and check (about a minute), including generated hostile
 inputs (`Scripts/make-adversarial.py`). Architecture and development
 notes for contributors (human or AI) are in [AGENTS.md](AGENTS.md).
+
+## License
+
+[MIT](LICENSE). The emoji shortcode table comes from
+[emojibase-data](https://github.com/milesj/emojibase) (MIT); its notice is in
+`Sources/Core/Markdown/EmojiTable.swift`.
