@@ -1,7 +1,7 @@
 {
     "$schema": "https://docs.renovatebot.com/renovate-schema.json",
     "description": [
-        "Only the workflows' actions: Peep has no dependencies, and the manifests under Examples/ are preview samples."
+        "only the workflows' actions: peep has no dependencies, and the manifests under examples/ are preview samples."
     ],
     "extends": [
         "config:recommended",
