@@ -1,8 +1,14 @@
 {
     "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "description": [
+        "Only the workflows' actions: Peep has no dependencies, and the manifests under Examples/ are preview samples."
+    ],
     "extends": [
         "config:recommended",
         "helpers:pinGitHubActionDigests"
+    ],
+    "enabledManagers": [
+        "github-actions"
     ],
     "timezone": "America/Los_Angeles",
     "schedule": [

@@ -488,7 +488,10 @@ as a fix with a test), and stay clean under `-sanitize=address`.
   (brew runs uninstall stanzas on every upgrade, and nothing would register the agent
   again); `zap` removes the agent. A fresh install needs Peep.app opened once: that
   registers the agent, which asks for Accessibility (the owner's to grant).
-- Renovate keeps action versions current (`renovate.json`).
+- Renovate keeps action versions current (`renovate.json`): the `github-actions` manager
+  only. Peep has no dependencies; the manifests under `Examples/` (`package.json`,
+  `Cargo.lock`, `go.mod`, a Dockerfile...) are preview samples, so Dependabot alerts are
+  off for this repo too (`vulnerability_alerts` in `repo_peep.tf`): every alert was one.
 - The owner's Macs install Peep through their dotfiles (lingrino/dotfiles):
   `cask 'lingrino/tap/peep'` in `home/exact_private_dot_config/private_homebrew/Brewfile_*`.
   Their `dot` runs `brew bundle cleanup --force --zap` and `brew upgrade`: a merge to main
