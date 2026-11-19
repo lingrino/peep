@@ -482,8 +482,7 @@ as a fix with a test), and stay clean under `-sanitize=address`.
 - Upgrades: `brew upgrade` swaps /Applications/Peep.app under the running agent. The agent
   watches the folder holding its bundle (FSEvents) and, once its executable is a different
   file, ends the extension processes still running the old code (Quick Look reuses them)
-  and exits; launchd starts the new agent (KeepAlive). The cask's `postflight_steps` clears
-  the quarantine flag brew puts on each copy, like fred's. It has no `uninstall launchctl:`
+  and exits; launchd starts the new agent (KeepAlive). The cask has no `uninstall launchctl:`
   (brew runs uninstall stanzas on every upgrade, and nothing would register the agent
   again); `zap` removes the agent. A fresh install needs Peep.app opened once: that
   registers the agent, which asks for Accessibility (the owner's to grant).
