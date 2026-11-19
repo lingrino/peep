@@ -43,11 +43,8 @@ SHA="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
 # processes still running the old code (Agent.swift, `restartWhenReplaced`). No `uninstall
 # launchctl:`: brew runs uninstall stanzas on every upgrade too, and only opening Peep.app
 # registers the agent again; `zap` removes it. A fresh install needs Peep.app opened once
-# (it registers the agent, which asks for Accessibility).
-# postflight clears the quarantine flag brew puts on every copy it installs, as fred's cask
-# does: otherwise macOS asks "downloaded from the Internet… open it?" before the agent or
-# the extension run new code. brew's sha256 check still pins the bits to the zip CI
-# notarized. The macOS minimum is LSMinimumSystemVersion's job.
+# (it registers the agent, which asks for Accessibility). The macOS minimum is
+# LSMinimumSystemVersion's job.
 cat > "$OUT/peep.rb" <<EOF
 cask "peep" do
   version "$VERSION"
@@ -61,10 +58,6 @@ cask "peep" do
   depends_on arch: :arm64
 
   app "Peep.app"
-
-  postflight_steps do
-    run "/usr/bin/xattr", args: ["-d", "-r", "com.apple.quarantine", "{{appdir}}/Peep.app"]
-  end
 
   zap launchctl: "com.lingrino.peep.agent"
 end
