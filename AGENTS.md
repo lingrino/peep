@@ -113,7 +113,7 @@ Finder ──Space──▶ Quick Look ──▶ PeepPreview.appex (sandboxed, v
 | `Examples/` | A sample of every supported type for looking at by hand (see its README); binaries come from `Scripts/make-examples.sh` |
 | `Bundle/` | Info.plists, entitlements |
 | `Scripts/` | build, test, check, dev, compare/baseline, corpus, profile, signing, release, type/emoji/example generation |
-| `.github/` | workflows: `validate` (PR checks), `release` (every merge to main), `review`; `renovate.json` at the root |
+| `.github/` | workflows: `validate` (PR checks) and `release` (every merge to main); `renovate.json` at the root |
 
 `Core` imports no Foundation (keep it that way: plain Swift + SIMD). `Render` uses AppKit/Core Text.
 
@@ -463,7 +463,6 @@ as a fix with a test), and stay clean under `-sanitize=address`.
   the deployment target needs, so the workflows set `DEVELOPER_DIR` to the Xcode this
   project builds with (27.2). CI's runners are slower and shared: `PEEP_SMOKE_BUDGET`
   raises the hostile-input time budget there.
-- `review`: Claude reviews each PR (anthropics/claude-code-action).
 - `release`, on every push to main: version 0.0.N, N = commits on main (squash merges, so
   every merge bumps it; `Scripts/build.sh` stamps it into both bundles with the git hash
   as `PeepRevision`). `Scripts/release.sh` builds, signs, notarizes (API key), staples,
